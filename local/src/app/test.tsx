@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import Constants from "expo-constants";
 import { ScrollView, Button, Text, View, StyleSheet } from "react-native";
 
-const HTTP_URL = Constants.expoConfig?.extra?.http_api_url;
-const WS_URL = Constants.expoConfig?.extra?.ws_url;
+const HTTP_URL = process.env.EXPO_PUBLIC_API_URL;
+const HELLO_API = HTTP_URL + "/hello";
+const WS_URL = HTTP_URL + "/ws";
 
 export default function test_page() {
   const [http_response, set_http_response] = useState<string>("");
@@ -13,7 +14,8 @@ export default function test_page() {
   const test_http = async () => {
     try {
       set_http_response("请求中...");
-      const response = await fetch(HTTP_URL);
+      const response = await fetch(HELLO_API);
+      console.log(HELLO_API);
       const data = await response.json();
       set_http_response(JSON.stringify(data));
     } catch (error) {

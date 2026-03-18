@@ -43,3 +43,7 @@ go run main.go
 # 或者构建
 go build main.go
 ```
+
+### lint&fmt standards
+
+见各部分的`readme.md`

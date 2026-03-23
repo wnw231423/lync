@@ -17,3 +17,7 @@ npx prettier . --write
 ```
 
 本项目添加了pre-commit hook，在git commit前会进行强制检查，遇到prettier无法自动修复的fmt问题或者lint问题会报错。
+
+## Unit tests
+
+本项目使用`jest`单元测试框架，可通过`npm run test`执行测试。建议在每次遇到错误需要debug时，马上写一个单元测试，然后再开始debug。

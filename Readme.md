@@ -1,6 +1,6 @@
 # Distributed Travel Space
 
-## Dev infos
+## How to start?
 
 ### local part
 
@@ -45,7 +45,3 @@ go build main.go
 ```
 
 3. 默认端口为8088，如有端口冲突，可自行更改配置，配置文件位于`internal/config/config.yaml`
-
-### lint&fmt standards
-
-见各部分的`readme.md`

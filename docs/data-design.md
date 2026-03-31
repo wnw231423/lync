@@ -88,8 +88,8 @@ http apis:
 - `POST /api/v1/spaces`
 - `GET /api/v1/sync`
 - `POST /api/v1/sync`
-- `POST /api/v1/photo`
-- `POST /api/v1/avator` (TODO)
+- `POST /api/v1/photos`
+- `POST /api/v1/avators`
 
 websocket apis:
 

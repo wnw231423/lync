@@ -1,25 +1,25 @@
 import { Model } from "@nozbe/watermelondb";
 import { date, field, readonly, text } from "@nozbe/watermelondb/decorators";
 
-// Expense 对应本地 `expenses` 表中的一条账单记录。
-export default class Expense extends Model {
-  static table = "expenses";
+// Comment 对应本地 `comments` 表中的一条动态评论记录。
+export default class Comment extends Model {
+  static table = "comments";
 
-  // spaceId 指向这笔账单所属的旅行空间。
+  // content 保存评论正文内容。
   // @ts-ignore
-  @text("space_id") spaceId;
+  @text("content") content;
 
-  // payerId 记录这笔账单由哪位成员付款。
+  // commenterId 记录是哪位成员写下了这条评论。
   // @ts-ignore
-  @text("payer_id") payerId;
+  @text("commenter_id") commenterId;
 
-  // amount 以“分”为单位存储金额，避免浮点计算误差。
+  // postId 把评论关联回所属动态。
   // @ts-ignore
-  @field("amount") amount;
+  @text("post_id") postId;
 
-  // description 保存给用户看的账单名称。
+  // commentedAt 记录评论逻辑上的发布时间。
   // @ts-ignore
-  @text("description") description;
+  @date("commented_at") commentedAt;
 
   // createdAt 记录这条本地数据的创建时间。
   // @ts-ignore

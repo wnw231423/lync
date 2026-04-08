@@ -1,25 +1,17 @@
 import { Model } from "@nozbe/watermelondb";
 import { date, field, readonly, text } from "@nozbe/watermelondb/decorators";
 
-// Expense 对应本地 `expenses` 表中的一条账单记录。
-export default class Expense extends Model {
-  static table = "expenses";
+// SpaceMember 对应用户和旅行空间之间的多对多关系记录。
+export default class SpaceMember extends Model {
+  static table = "space_members";
 
-  // spaceId 指向这笔账单所属的旅行空间。
+  // spaceId 指向所属的旅行空间。
   // @ts-ignore
   @text("space_id") spaceId;
 
-  // payerId 记录这笔账单由哪位成员付款。
+  // userId 指向该空间里的成员用户。
   // @ts-ignore
-  @text("payer_id") payerId;
-
-  // amount 以“分”为单位存储金额，避免浮点计算误差。
-  // @ts-ignore
-  @field("amount") amount;
-
-  // description 保存给用户看的账单名称。
-  // @ts-ignore
-  @text("description") description;
+  @text("user_id") userId;
 
   // createdAt 记录这条本地数据的创建时间。
   // @ts-ignore

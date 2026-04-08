@@ -36,6 +36,14 @@
           }
         }
       ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "允许应用访问你的相册，用于选择旅行照片。",
+          "savePhotosPermission": "允许应用把旅行照片保存到系统相册。",
+          "granularPermissions": ["photo"]
+        }
+      ],
       "expo-build-properties"
     ],
     "experiments": {

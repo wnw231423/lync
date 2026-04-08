@@ -1,25 +1,21 @@
 import { Model } from "@nozbe/watermelondb";
 import { date, field, readonly, text } from "@nozbe/watermelondb/decorators";
 
-// Expense 对应本地 `expenses` 表中的一条账单记录。
-export default class Expense extends Model {
-  static table = "expenses";
+// User 对应本地 `users` 表里持久化保存的一条旅行者资料记录。
+export default class User extends Model {
+  static table = "users";
 
-  // spaceId 指向这笔账单所属的旅行空间。
+  // nickname 表示空间列表、动态等场景里展示的昵称。
   // @ts-ignore
-  @text("space_id") spaceId;
+  @text("nickname") nickname;
 
-  // payerId 记录这笔账单由哪位成员付款。
+  // avatarLocalUri 指向设备上选中的本地沙盒头像文件。
   // @ts-ignore
-  @text("payer_id") payerId;
+  @text("avatar_local_uri") avatarLocalUri;
 
-  // amount 以“分”为单位存储金额，避免浮点计算误差。
+  // avatarRemoteUrl 在没有本地头像时保存一个可回退使用的网络头像地址。
   // @ts-ignore
-  @field("amount") amount;
-
-  // description 保存给用户看的账单名称。
-  // @ts-ignore
-  @text("description") description;
+  @text("avatar_remote_url") avatarRemoteUrl;
 
   // createdAt 记录这条本地数据的创建时间。
   // @ts-ignore

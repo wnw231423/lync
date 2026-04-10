@@ -42,8 +42,22 @@ func InitDB(dsn string) error {
 		return err
 	}
 
+	// 历史列名 server_created -> server_created_at（在 AutoMigrate 追加新列前先改名，避免双列并存）
+	if err := renameLegacyServerCreatedColumn(DB); err != nil {
+		log.Printf("数据库 server_created 列重命名失败: %v", err)
+		return err
+	}
+
 	if err := AutoMigrateAll(); err != nil {
 		log.Printf("数据库迁移失败: %v", err)
+		return err
+	}
+	if err := copyLegacyServerCreatedIntoServerCreatedAt(DB); err != nil {
+		log.Printf("数据库 server_created 数据回填到 server_created_at 失败: %v", err)
+		return err
+	}
+	if err := backfillCommentSpaceID(DB); err != nil {
+		log.Printf("comments.space_id 历史回填失败: %v", err)
 		return err
 	}
 	if err := backfillServerSyncColumns(DB); err != nil {
@@ -62,23 +76,79 @@ func backfillServerSyncColumns(db *gorm.DB) error {
 		if err != nil {
 			return err
 		}
-		hasServerCreated, err := hasColumn(db, table, "server_created")
+		hasServerCreatedAt, err := hasColumn(db, table, "server_created_at")
 		if err != nil {
 			return err
 		}
-		if !hasLastModified || !hasServerCreated {
+		if !hasLastModified || !hasServerCreatedAt {
 			continue
 		}
-		queryCreated := "UPDATE " + table + " SET server_created = CASE WHEN created_at > 0 THEN created_at ELSE updated_at END WHERE server_created = 0"
+		queryCreated := "UPDATE " + table + " SET server_created_at = CASE WHEN created_at > 0 THEN created_at ELSE updated_at END WHERE server_created_at = 0"
 		if err := db.Exec(queryCreated).Error; err != nil {
 			return err
 		}
-		queryModified := "UPDATE " + table + " SET last_modified = GREATEST(server_created, updated_at, deleted_at) WHERE last_modified = 0"
+		queryModified := "UPDATE " + table + " SET last_modified = GREATEST(server_created_at, updated_at, deleted_at) WHERE last_modified = 0"
 		if err := db.Exec(queryModified).Error; err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// renameLegacyServerCreatedColumn 将旧列 server_created 改名为 server_created_at（仅当新列尚不存在时）。
+func renameLegacyServerCreatedColumn(db *gorm.DB) error {
+	tables := []string{"users", "spaces", "space_members", "photos", "expenses", "posts", "comments"}
+	for _, table := range tables {
+		hasOld, err := hasColumn(db, table, "server_created")
+		if err != nil {
+			return err
+		}
+		hasNew, err := hasColumn(db, table, "server_created_at")
+		if err != nil {
+			return err
+		}
+		if !hasOld || hasNew {
+			continue
+		}
+		q := "ALTER TABLE " + table + " RENAME COLUMN server_created TO server_created_at"
+		if err := db.Exec(q).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// copyLegacyServerCreatedIntoServerCreatedAt 在同时存在 server_created 与 server_created_at 时，把旧列数据拷入新列（AutoMigrate 可能已追加空的新列）。
+func copyLegacyServerCreatedIntoServerCreatedAt(db *gorm.DB) error {
+	tables := []string{"users", "spaces", "space_members", "photos", "expenses", "posts", "comments"}
+	for _, table := range tables {
+		hasOld, err := hasColumn(db, table, "server_created")
+		if err != nil {
+			return err
+		}
+		hasNew, err := hasColumn(db, table, "server_created_at")
+		if err != nil {
+			return err
+		}
+		if !hasOld || !hasNew {
+			continue
+		}
+		q := "UPDATE " + table + " SET server_created_at = server_created WHERE server_created > 0 AND server_created_at = 0"
+		if err := db.Exec(q).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// backfillCommentSpaceID 用 post 的 space_id 补齐历史 comments（新设计下 comments 需直接带 space_id）。
+func backfillCommentSpaceID(db *gorm.DB) error {
+	hasCol, err := hasColumn(db, "comments", "space_id")
+	if err != nil || !hasCol {
+		return err
+	}
+	q := `UPDATE comments AS c SET space_id = p.space_id FROM posts AS p WHERE c.post_id = p.id AND (c.space_id IS NULL OR c.space_id = '')`
+	return db.Exec(q).Error
 }
 
 type nullPatch struct {
@@ -90,6 +160,7 @@ type nullPatch struct {
 func normalizeLegacyNulls(db *gorm.DB) error {
 	patches := []nullPatch{
 		{table: "users", column: "nickname", defaultValue: "''"},
+		// avatar_remote_url 已废弃；历史库若仍有该列，继续把 NULL 洗净以免约束失败
 		{table: "users", column: "avatar_remote_url", defaultValue: "''"},
 		{table: "users", column: "created_at", defaultValue: "0"},
 		{table: "users", column: "updated_at", defaultValue: "0"},
@@ -107,7 +178,9 @@ func normalizeLegacyNulls(db *gorm.DB) error {
 		{table: "space_members", column: "deleted_at", defaultValue: "0"},
 
 		{table: "posts", column: "space_id", defaultValue: "''"},
+		// poster_id / content 已废弃；历史列若仍存在则洗净 NULL
 		{table: "posts", column: "poster_id", defaultValue: "''"},
+		{table: "posts", column: "content", defaultValue: "''"},
 		{table: "posts", column: "created_at", defaultValue: "0"},
 		{table: "posts", column: "updated_at", defaultValue: "0"},
 		{table: "posts", column: "deleted_at", defaultValue: "0"},
@@ -129,6 +202,7 @@ func normalizeLegacyNulls(db *gorm.DB) error {
 		{table: "expenses", column: "updated_at", defaultValue: "0"},
 		{table: "expenses", column: "deleted_at", defaultValue: "0"},
 
+		{table: "comments", column: "space_id", defaultValue: "''"},
 		{table: "comments", column: "content", defaultValue: "''"},
 		{table: "comments", column: "commenter_id", defaultValue: "''"},
 		{table: "comments", column: "post_id", defaultValue: "''"},
@@ -174,12 +248,19 @@ func normalizeLegacyTimestampUnits(db *gorm.DB) error {
 		column string
 	}{
 		{"users", "created_at"}, {"users", "updated_at"}, {"users", "deleted_at"},
+		{"users", "last_modified"}, {"users", "server_created"}, {"users", "server_created_at"},
 		{"spaces", "created_at"}, {"spaces", "updated_at"}, {"spaces", "deleted_at"},
+		{"spaces", "last_modified"}, {"spaces", "server_created"}, {"spaces", "server_created_at"},
 		{"space_members", "created_at"}, {"space_members", "updated_at"}, {"space_members", "deleted_at"},
+		{"space_members", "last_modified"}, {"space_members", "server_created"}, {"space_members", "server_created_at"},
 		{"posts", "created_at"}, {"posts", "updated_at"}, {"posts", "deleted_at"},
+		{"posts", "last_modified"}, {"posts", "server_created"}, {"posts", "server_created_at"},
 		{"photos", "shoted_at"}, {"photos", "created_at"}, {"photos", "updated_at"}, {"photos", "deleted_at"},
+		{"photos", "last_modified"}, {"photos", "server_created"}, {"photos", "server_created_at"},
 		{"comments", "commented_at"}, {"comments", "created_at"}, {"comments", "updated_at"}, {"comments", "deleted_at"},
+		{"comments", "last_modified"}, {"comments", "server_created"}, {"comments", "server_created_at"},
 		{"expenses", "created_at"}, {"expenses", "updated_at"}, {"expenses", "deleted_at"},
+		{"expenses", "last_modified"}, {"expenses", "server_created"}, {"expenses", "server_created_at"},
 	}
 	for _, c := range cols {
 		exists, err := hasColumn(db, c.table, c.column)

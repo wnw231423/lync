@@ -176,11 +176,13 @@ WatermelonDB **自动**处理：
 
 客户端表的 `created_at` / `updated_at` 是 WatermelonDB 管理的**客户端字段**（客户端时钟设的），不可靠。服务器需要**额外的服务器专用字段**作为 Sync 的时间基准。
 
-| 字段 | 谁设置 | 用途 |
-|---|---|---|
-| `last_modified` | 服务器，每次 INSERT/UPDATE 时 `NOW()` | Pull 增量查询 |
-| `server_created` | 服务器，INSERT 时 `NOW()` | 区分 created vs updated |
-| `deleted_at` | 已有字段，软删除 | Pull 的 deleted 列表 |
+
+| 字段               | 谁设置                            | 用途                    |
+| ---------------- | ------------------------------ | --------------------- |
+| `last_modified`  | 服务器，每次 INSERT/UPDATE 时 `NOW()` | Pull 增量查询             |
+| `server_created` | 服务器，INSERT 时 `NOW()`           | 区分 created vs updated |
+| `deleted_at`     | 已有字段，软删除                       | Pull 的 deleted 列表     |
+
 
 #### 以 expenses 为例的 SQL 建表
 
@@ -389,8 +391,8 @@ export async function sync() {
 
 1. 数据库 Sync 完成
 2. 客户端检查本地 photo/avatar 记录：
-   - `local_uri` 为空但 `remote_url` 不为空 → 根据 `remote_url` 下载文件到本地，填入 `local_uri`
-   - `local_uri` 不为空但 `remote_url` 为空 → 通过 `POST /api/v1/photos` 或 `POST /api/v1/avatars` 上传文件，将返回的 `remote_url` 填入本地记录
+  - `local_uri` 为空但 `remote_url` 不为空 → 根据 `remote_url` 下载文件到本地，填入 `local_uri`
+  - `local_uri` 不为空但 `remote_url` 为空 → 通过 `POST /api/v1/photos` 或 `POST /api/v1/avatars` 上传文件，将返回的 `remote_url` 填入本地记录
 3. 文件传输完成后，再触发一次数据库 Sync 把更新后的 `local_uri` / `remote_url` 同步上去
 
 这个流程独立于上面的数据库 Sync 机制，可以在数据库 Sync 跑通后再实现。

@@ -59,13 +59,11 @@ type SyncChangeBucket struct {
 }
 
 type SyncUser struct {
-	ID              string `json:"id"`
-	Nickname        string `json:"nickname"`
-	AvatarLocalURI  string `json:"avatar_local_uri"`
-	AvatarRemoteURL string `json:"avatar_remote_url"`
-	CreatedAt       int64  `json:"created_at"`
-	UpdatedAt       int64  `json:"updated_at"`
-	DeletedAt       int64  `json:"deleted_at"`
+	ID        string `json:"id"`
+	Nickname  string `json:"nickname"`
+	CreatedAt int64  `json:"created_at"`
+	UpdatedAt int64  `json:"updated_at"`
+	DeletedAt int64  `json:"deleted_at"`
 }
 
 type SyncSpace struct {
@@ -90,7 +88,6 @@ type SyncPhoto struct {
 	SpaceID    string `json:"space_id"`
 	UploaderID string `json:"uploader_id"`
 	RemoteURL  string `json:"remote_url"`
-	LocalURI   string `json:"local_uri"`
 	PostID     string `json:"post_id"`
 	ShotedAt   int64  `json:"shoted_at"`
 	CreatedAt  int64  `json:"created_at"`
@@ -112,8 +109,6 @@ type SyncExpense struct {
 type SyncPost struct {
 	ID        string `json:"id"`
 	SpaceID   string `json:"space_id"`
-	PosterID  string `json:"poster_id"`
-	Content   string `json:"content"`
 	CreatedAt int64  `json:"created_at"`
 	UpdatedAt int64  `json:"updated_at"`
 	DeletedAt int64  `json:"deleted_at"`
@@ -121,6 +116,7 @@ type SyncPost struct {
 
 type SyncComment struct {
 	ID          string `json:"id"`
+	SpaceID     string `json:"space_id"`
 	Content     string `json:"content"`
 	CommenterID string `json:"commenter_id"`
 	PostID      string `json:"post_id"`
@@ -246,8 +242,8 @@ func HttpPostSpaces(c *gin.Context) {
 				if user.CreatedAt == 0 {
 					user.CreatedAt = ts
 				}
-				if user.ServerCreated == 0 {
-					user.ServerCreated = ts
+				if user.ServerCreatedAt == 0 {
+					user.ServerCreatedAt = ts
 				}
 				user.DeletedAt = 0
 				if err := tx.Save(&user).Error; err != nil {
@@ -258,12 +254,11 @@ func HttpPostSpaces(c *gin.Context) {
 			user = db.User{
 				ID:              req.UserID,
 				Nickname:        "user-" + req.UserID,
-				AvatarRemoteURL: "",
 				CreatedAt:       ts,
 				UpdatedAt:       ts,
 				DeletedAt:       0,
 				LastModified:    ts,
-				ServerCreated:   ts,
+				ServerCreatedAt: ts,
 			}
 			if err := tx.Create(&user).Error; err != nil {
 				return err
@@ -283,8 +278,8 @@ func HttpPostSpaces(c *gin.Context) {
 				if space.CreatedAt == 0 {
 					space.CreatedAt = ts
 				}
-				if space.ServerCreated == 0 {
-					space.ServerCreated = ts
+				if space.ServerCreatedAt == 0 {
+					space.ServerCreatedAt = ts
 				}
 				space.DeletedAt = 0
 				if err := tx.Save(&space).Error; err != nil {
@@ -293,7 +288,7 @@ func HttpPostSpaces(c *gin.Context) {
 			}
 		case errors.Is(err, gorm.ErrRecordNotFound):
 			space = db.Space{
-				ID: req.SpaceID, Name: req.SpaceName, CreatedAt: ts, UpdatedAt: ts, DeletedAt: 0, LastModified: ts, ServerCreated: ts,
+				ID: req.SpaceID, Name: req.SpaceName, CreatedAt: ts, UpdatedAt: ts, DeletedAt: 0, LastModified: ts, ServerCreatedAt: ts,
 			}
 			if err := tx.Create(&space).Error; err != nil {
 				return err
@@ -315,8 +310,8 @@ func HttpPostSpaces(c *gin.Context) {
 				if member.CreatedAt == 0 {
 					member.CreatedAt = ts
 				}
-				if member.ServerCreated == 0 {
-					member.ServerCreated = ts
+				if member.ServerCreatedAt == 0 {
+					member.ServerCreatedAt = ts
 				}
 				member.DeletedAt = 0
 				if err := tx.Save(&member).Error; err != nil {
@@ -325,7 +320,7 @@ func HttpPostSpaces(c *gin.Context) {
 			}
 		case errors.Is(err, gorm.ErrRecordNotFound):
 			member = db.SpaceMember{
-				ID: memberID, SpaceID: req.SpaceID, UserID: req.UserID, CreatedAt: ts, UpdatedAt: ts, DeletedAt: 0, LastModified: ts, ServerCreated: ts,
+				ID: memberID, SpaceID: req.SpaceID, UserID: req.UserID, CreatedAt: ts, UpdatedAt: ts, DeletedAt: 0, LastModified: ts, ServerCreatedAt: ts,
 			}
 			if err := tx.Create(&member).Error; err != nil {
 				return err
@@ -792,12 +787,11 @@ func upsertUser(tx *gorm.DB, item SyncUser, mode pushMode, lastPulledAt int64) e
 	err := tx.Where("id = ?", item.ID).First(&existing).Error
 	ts := nowMillis()
 	record := db.User{
-		ID:              item.ID,
-		Nickname:        item.Nickname,
-		AvatarRemoteURL: item.AvatarRemoteURL,
-		CreatedAt:       item.CreatedAt,
-		UpdatedAt:       item.UpdatedAt,
-		DeletedAt:       item.DeletedAt,
+		ID:         item.ID,
+		Nickname:   item.Nickname,
+		CreatedAt:  item.CreatedAt,
+		UpdatedAt:  item.UpdatedAt,
+		DeletedAt:  item.DeletedAt,
 	}
 	if record.CreatedAt == 0 {
 		record.CreatedAt = ts
@@ -811,15 +805,14 @@ func upsertUser(tx *gorm.DB, item SyncUser, mode pushMode, lastPulledAt int64) e
 			return syncConflictError{table: "users", id: item.ID}
 		}
 		return tx.Model(&existing).UpdateColumns(map[string]any{
-			"nickname":          record.Nickname,
-			"avatar_remote_url": record.AvatarRemoteURL,
-			"created_at":        record.CreatedAt,
-			"updated_at":        record.UpdatedAt,
-			"deleted_at":        record.DeletedAt,
-			"last_modified":     ts,
+			"nickname":      record.Nickname,
+			"created_at":    record.CreatedAt,
+			"updated_at":    record.UpdatedAt,
+			"deleted_at":    record.DeletedAt,
+			"last_modified": ts,
 		}).Error
 	case errors.Is(err, gorm.ErrRecordNotFound):
-		record.ServerCreated = ts
+		record.ServerCreatedAt = ts
 		record.LastModified = ts
 		return tx.Create(&record).Error
 	default:
@@ -857,7 +850,7 @@ func upsertSpace(tx *gorm.DB, item SyncSpace, mode pushMode, lastPulledAt int64)
 			"last_modified": ts,
 		}).Error
 	case errors.Is(err, gorm.ErrRecordNotFound):
-		record.ServerCreated = ts
+		record.ServerCreatedAt = ts
 		record.LastModified = ts
 		return tx.Create(&record).Error
 	default:
@@ -897,7 +890,7 @@ func upsertSpaceMember(tx *gorm.DB, item SyncSpaceMember, mode pushMode, lastPul
 			"last_modified": ts,
 		}).Error
 	case errors.Is(err, gorm.ErrRecordNotFound):
-		record.ServerCreated = ts
+		record.ServerCreatedAt = ts
 		record.LastModified = ts
 		return tx.Create(&record).Error
 	default:
@@ -943,7 +936,7 @@ func upsertPhoto(tx *gorm.DB, item SyncPhoto, mode pushMode, lastPulledAt int64)
 			"last_modified":  ts,
 		}).Error
 	case errors.Is(err, gorm.ErrRecordNotFound):
-		record.ServerCreated = ts
+		record.ServerCreatedAt = ts
 		record.LastModified = ts
 		return tx.Create(&record).Error
 	default:
@@ -987,7 +980,7 @@ func upsertExpense(tx *gorm.DB, item SyncExpense, mode pushMode, lastPulledAt in
 			"last_modified":  ts,
 		}).Error
 	case errors.Is(err, gorm.ErrRecordNotFound):
-		record.ServerCreated = ts
+		record.ServerCreatedAt = ts
 		record.LastModified = ts
 		return tx.Create(&record).Error
 	default:
@@ -1002,8 +995,6 @@ func upsertPost(tx *gorm.DB, item SyncPost, mode pushMode, lastPulledAt int64) e
 	record := db.Post{
 		ID:        item.ID,
 		SpaceID:   item.SpaceID,
-		PosterID:  item.PosterID,
-		Content:   item.Content,
 		CreatedAt: normalizeTSMillis(item.CreatedAt),
 		UpdatedAt: normalizeTSMillis(item.UpdatedAt),
 		DeletedAt: normalizeTSMillis(item.DeletedAt),
@@ -1020,16 +1011,14 @@ func upsertPost(tx *gorm.DB, item SyncPost, mode pushMode, lastPulledAt int64) e
 			return syncConflictError{table: "posts", id: item.ID}
 		}
 		return tx.Model(&existing).UpdateColumns(map[string]any{
-			"space_id":   record.SpaceID,
-			"poster_id":  record.PosterID,
-			"content":    record.Content,
-			"created_at": record.CreatedAt,
-			"updated_at": record.UpdatedAt,
-			"deleted_at": record.DeletedAt,
+			"space_id":      record.SpaceID,
+			"created_at":    record.CreatedAt,
+			"updated_at":    record.UpdatedAt,
+			"deleted_at":    record.DeletedAt,
 			"last_modified": ts,
 		}).Error
 	case errors.Is(err, gorm.ErrRecordNotFound):
-		record.ServerCreated = ts
+		record.ServerCreatedAt = ts
 		record.LastModified = ts
 		return tx.Create(&record).Error
 	default:
@@ -1043,6 +1032,7 @@ func upsertComment(tx *gorm.DB, item SyncComment, mode pushMode, lastPulledAt in
 	ts := nowMillis()
 	record := db.Comment{
 		ID:          item.ID,
+		SpaceID:     item.SpaceID,
 		Content:     item.Content,
 		CommenterID: item.CommenterID,
 		PostID:      item.PostID,
@@ -1063,6 +1053,7 @@ func upsertComment(tx *gorm.DB, item SyncComment, mode pushMode, lastPulledAt in
 			return syncConflictError{table: "comments", id: item.ID}
 		}
 		return tx.Model(&existing).UpdateColumns(map[string]any{
+			"space_id":       record.SpaceID,
 			"content":        record.Content,
 			"commenter_id":   record.CommenterID,
 			"post_id":        record.PostID,
@@ -1073,7 +1064,7 @@ func upsertComment(tx *gorm.DB, item SyncComment, mode pushMode, lastPulledAt in
 			"last_modified":  ts,
 		}).Error
 	case errors.Is(err, gorm.ErrRecordNotFound):
-		record.ServerCreated = ts
+		record.ServerCreatedAt = ts
 		record.LastModified = ts
 		return tx.Create(&record).Error
 	default:
@@ -1120,10 +1111,10 @@ func pullUsers(spaceID string, lastPulledAt int64) (PullChangeBucket, error) {
 			Where("space_members.space_id = ?", spaceID).
 			Session(&gorm.Session{})
 	}
-	if err := baseQuery().Where("users.deleted_at = 0 AND users.last_modified > ? AND users.server_created > ?", lastPulledAt, lastPulledAt).Find(&createdRows).Error; err != nil {
+	if err := baseQuery().Where("users.deleted_at = 0 AND users.last_modified > ? AND users.server_created_at > ?", lastPulledAt, lastPulledAt).Find(&createdRows).Error; err != nil {
 		return PullChangeBucket{}, err
 	}
-	if err := baseQuery().Where("users.deleted_at = 0 AND users.last_modified > ? AND users.server_created <= ?", lastPulledAt, lastPulledAt).Find(&updatedRows).Error; err != nil {
+	if err := baseQuery().Where("users.deleted_at = 0 AND users.last_modified > ? AND users.server_created_at <= ?", lastPulledAt, lastPulledAt).Find(&updatedRows).Error; err != nil {
 		return PullChangeBucket{}, err
 	}
 	if err := baseQuery().Where("users.deleted_at > ?", lastPulledAt).Pluck("users.id", &deletedIDs).Error; err != nil {
@@ -1143,10 +1134,10 @@ func pullSpaces(spaceID string, lastPulledAt int64) (PullChangeBucket, error) {
 	baseQuery := func() *gorm.DB {
 		return db.DB.Model(&db.Space{}).Session(&gorm.Session{})
 	}
-	if err := baseQuery().Where("id = ? AND deleted_at = 0 AND last_modified > ? AND server_created > ?", spaceID, lastPulledAt, lastPulledAt).Find(&createdRows).Error; err != nil {
+	if err := baseQuery().Where("id = ? AND deleted_at = 0 AND last_modified > ? AND server_created_at > ?", spaceID, lastPulledAt, lastPulledAt).Find(&createdRows).Error; err != nil {
 		return PullChangeBucket{}, err
 	}
-	if err := baseQuery().Where("id = ? AND deleted_at = 0 AND last_modified > ? AND server_created <= ?", spaceID, lastPulledAt, lastPulledAt).Find(&updatedRows).Error; err != nil {
+	if err := baseQuery().Where("id = ? AND deleted_at = 0 AND last_modified > ? AND server_created_at <= ?", spaceID, lastPulledAt, lastPulledAt).Find(&updatedRows).Error; err != nil {
 		return PullChangeBucket{}, err
 	}
 	if err := baseQuery().Where("id = ? AND deleted_at > ?", spaceID, lastPulledAt).Pluck("id", &deletedIDs).Error; err != nil {
@@ -1166,10 +1157,10 @@ func pullSpaceMembers(spaceID string, lastPulledAt int64) (PullChangeBucket, err
 	baseQuery := func() *gorm.DB {
 		return db.DB.Model(&db.SpaceMember{}).Session(&gorm.Session{})
 	}
-	if err := baseQuery().Where("space_id = ? AND deleted_at = 0 AND last_modified > ? AND server_created > ?", spaceID, lastPulledAt, lastPulledAt).Find(&createdRows).Error; err != nil {
+	if err := baseQuery().Where("space_id = ? AND deleted_at = 0 AND last_modified > ? AND server_created_at > ?", spaceID, lastPulledAt, lastPulledAt).Find(&createdRows).Error; err != nil {
 		return PullChangeBucket{}, err
 	}
-	if err := baseQuery().Where("space_id = ? AND deleted_at = 0 AND last_modified > ? AND server_created <= ?", spaceID, lastPulledAt, lastPulledAt).Find(&updatedRows).Error; err != nil {
+	if err := baseQuery().Where("space_id = ? AND deleted_at = 0 AND last_modified > ? AND server_created_at <= ?", spaceID, lastPulledAt, lastPulledAt).Find(&updatedRows).Error; err != nil {
 		return PullChangeBucket{}, err
 	}
 	if err := baseQuery().Where("space_id = ? AND deleted_at > ?", spaceID, lastPulledAt).Pluck("id", &deletedIDs).Error; err != nil {
@@ -1189,10 +1180,10 @@ func pullPhotos(spaceID string, lastPulledAt int64) (PullChangeBucket, error) {
 	baseQuery := func() *gorm.DB {
 		return db.DB.Model(&db.Photo{}).Session(&gorm.Session{})
 	}
-	if err := baseQuery().Where("space_id = ? AND deleted_at = 0 AND last_modified > ? AND server_created > ?", spaceID, lastPulledAt, lastPulledAt).Find(&createdRows).Error; err != nil {
+	if err := baseQuery().Where("space_id = ? AND deleted_at = 0 AND last_modified > ? AND server_created_at > ?", spaceID, lastPulledAt, lastPulledAt).Find(&createdRows).Error; err != nil {
 		return PullChangeBucket{}, err
 	}
-	if err := baseQuery().Where("space_id = ? AND deleted_at = 0 AND last_modified > ? AND server_created <= ?", spaceID, lastPulledAt, lastPulledAt).Find(&updatedRows).Error; err != nil {
+	if err := baseQuery().Where("space_id = ? AND deleted_at = 0 AND last_modified > ? AND server_created_at <= ?", spaceID, lastPulledAt, lastPulledAt).Find(&updatedRows).Error; err != nil {
 		return PullChangeBucket{}, err
 	}
 	if err := baseQuery().Where("space_id = ? AND deleted_at > ?", spaceID, lastPulledAt).Pluck("id", &deletedIDs).Error; err != nil {
@@ -1212,10 +1203,10 @@ func pullExpenses(spaceID string, lastPulledAt int64) (PullChangeBucket, error) 
 	baseQuery := func() *gorm.DB {
 		return db.DB.Model(&db.Expense{}).Session(&gorm.Session{})
 	}
-	if err := baseQuery().Where("space_id = ? AND deleted_at = 0 AND last_modified > ? AND server_created > ?", spaceID, lastPulledAt, lastPulledAt).Find(&createdRows).Error; err != nil {
+	if err := baseQuery().Where("space_id = ? AND deleted_at = 0 AND last_modified > ? AND server_created_at > ?", spaceID, lastPulledAt, lastPulledAt).Find(&createdRows).Error; err != nil {
 		return PullChangeBucket{}, err
 	}
-	if err := baseQuery().Where("space_id = ? AND deleted_at = 0 AND last_modified > ? AND server_created <= ?", spaceID, lastPulledAt, lastPulledAt).Find(&updatedRows).Error; err != nil {
+	if err := baseQuery().Where("space_id = ? AND deleted_at = 0 AND last_modified > ? AND server_created_at <= ?", spaceID, lastPulledAt, lastPulledAt).Find(&updatedRows).Error; err != nil {
 		return PullChangeBucket{}, err
 	}
 	if err := baseQuery().Where("space_id = ? AND deleted_at > ?", spaceID, lastPulledAt).Pluck("id", &deletedIDs).Error; err != nil {
@@ -1235,10 +1226,10 @@ func pullPosts(spaceID string, lastPulledAt int64) (PullChangeBucket, error) {
 	baseQuery := func() *gorm.DB {
 		return db.DB.Model(&db.Post{}).Session(&gorm.Session{})
 	}
-	if err := baseQuery().Where("space_id = ? AND deleted_at = 0 AND last_modified > ? AND server_created > ?", spaceID, lastPulledAt, lastPulledAt).Find(&createdRows).Error; err != nil {
+	if err := baseQuery().Where("space_id = ? AND deleted_at = 0 AND last_modified > ? AND server_created_at > ?", spaceID, lastPulledAt, lastPulledAt).Find(&createdRows).Error; err != nil {
 		return PullChangeBucket{}, err
 	}
-	if err := baseQuery().Where("space_id = ? AND deleted_at = 0 AND last_modified > ? AND server_created <= ?", spaceID, lastPulledAt, lastPulledAt).Find(&updatedRows).Error; err != nil {
+	if err := baseQuery().Where("space_id = ? AND deleted_at = 0 AND last_modified > ? AND server_created_at <= ?", spaceID, lastPulledAt, lastPulledAt).Find(&updatedRows).Error; err != nil {
 		return PullChangeBucket{}, err
 	}
 	if err := baseQuery().Where("space_id = ? AND deleted_at > ?", spaceID, lastPulledAt).Pluck("id", &deletedIDs).Error; err != nil {
@@ -1256,22 +1247,20 @@ func pullComments(spaceID string, lastPulledAt int64) (PullChangeBucket, error) 
 	var updatedRows []db.Comment
 	var deletedIDs []string
 	baseQuery := func() *gorm.DB {
-		return db.DB.Model(&db.Comment{}).
-			Joins("JOIN posts ON posts.id = comments.post_id").
-			Session(&gorm.Session{})
+		return db.DB.Model(&db.Comment{}).Session(&gorm.Session{})
 	}
 	if err := baseQuery().
-		Where("posts.space_id = ? AND comments.deleted_at = 0 AND comments.last_modified > ? AND comments.server_created > ?", spaceID, lastPulledAt, lastPulledAt).
+		Where("comments.space_id = ? AND comments.deleted_at = 0 AND comments.last_modified > ? AND comments.server_created_at > ?", spaceID, lastPulledAt, lastPulledAt).
 		Find(&createdRows).Error; err != nil {
 		return PullChangeBucket{}, err
 	}
 	if err := baseQuery().
-		Where("posts.space_id = ? AND comments.deleted_at = 0 AND comments.last_modified > ? AND comments.server_created <= ?", spaceID, lastPulledAt, lastPulledAt).
+		Where("comments.space_id = ? AND comments.deleted_at = 0 AND comments.last_modified > ? AND comments.server_created_at <= ?", spaceID, lastPulledAt, lastPulledAt).
 		Find(&updatedRows).Error; err != nil {
 		return PullChangeBucket{}, err
 	}
 	if err := baseQuery().
-		Where("posts.space_id = ? AND comments.deleted_at > ?", spaceID, lastPulledAt).
+		Where("comments.space_id = ? AND comments.deleted_at > ?", spaceID, lastPulledAt).
 		Pluck("comments.id", &deletedIDs).Error; err != nil {
 		return PullChangeBucket{}, err
 	}
@@ -1286,13 +1275,11 @@ func mapUsersForPull(rows []db.User) []any {
 	out := make([]any, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, gin.H{
-			"id":                r.ID,
-			"nickname":          r.Nickname,
-			"avatar_remote_url": r.AvatarRemoteURL,
-			"avatar_local_uri":  "",
-			"created_at":        normalizeTSMillis(r.CreatedAt),
-			"updated_at":        normalizeTSMillis(r.UpdatedAt),
-			"deleted_at":        normalizeTSMillis(r.DeletedAt),
+			"id":         r.ID,
+			"nickname":   r.Nickname,
+			"created_at": normalizeTSMillis(r.CreatedAt),
+			"updated_at": normalizeTSMillis(r.UpdatedAt),
+			"deleted_at": normalizeTSMillis(r.DeletedAt),
 		})
 	}
 	return out
@@ -1335,7 +1322,6 @@ func mapPhotosForPull(rows []db.Photo) []any {
 			"space_id":    r.SpaceID,
 			"uploader_id": r.UploaderID,
 			"remote_url":  r.RemoteURL,
-			"local_uri":   "",
 			"post_id":     r.PostID,
 			"shoted_at":   normalizeTSMillis(r.ShotedAt),
 			"created_at":  normalizeTSMillis(r.CreatedAt),
@@ -1369,8 +1355,6 @@ func mapPostsForPull(rows []db.Post) []any {
 		out = append(out, gin.H{
 			"id":         r.ID,
 			"space_id":   r.SpaceID,
-			"poster_id":  r.PosterID,
-			"content":    r.Content,
 			"created_at": normalizeTSMillis(r.CreatedAt),
 			"updated_at": normalizeTSMillis(r.UpdatedAt),
 			"deleted_at": normalizeTSMillis(r.DeletedAt),
@@ -1384,6 +1368,7 @@ func mapCommentsForPull(rows []db.Comment) []any {
 	for _, r := range rows {
 		out = append(out, gin.H{
 			"id":           r.ID,
+			"space_id":     r.SpaceID,
 			"content":      r.Content,
 			"commenter_id": r.CommenterID,
 			"post_id":      r.PostID,
@@ -1457,8 +1442,8 @@ func HttpPostPhotos(c *gin.Context) {
 					existing.UpdatedAt = ts
 					existing.DeletedAt = 0
 					existing.LastModified = ts
-					if existing.ServerCreated == 0 {
-						existing.ServerCreated = ts
+					if existing.ServerCreatedAt == 0 {
+						existing.ServerCreatedAt = ts
 					}
 					return tx.Save(&existing).Error
 				}
@@ -1475,7 +1460,7 @@ func HttpPostPhotos(c *gin.Context) {
 					UpdatedAt:  ts,
 					DeletedAt:  0,
 					LastModified: ts,
-					ServerCreated: ts,
+					ServerCreatedAt: ts,
 				}
 				return tx.Create(&record).Error
 			default:

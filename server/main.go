@@ -36,14 +36,14 @@ func main() {
 	r := gin.Default()
 
 	// 为了解决本地开发的CORS问题
-    r.Use(cors.New(cors.Config{
+	r.Use(cors.New(cors.Config{
 		AllowAllOrigins:  true,
-        AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-        AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
-        ExposeHeaders:    []string{"Content-Length"},
-        AllowCredentials: true,
-        MaxAge:           12 * time.Hour,
-    }))
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "X-User-Id", "X-Space-Id"},
+		ExposeHeaders:    []string{"Content-Length"},
+		AllowCredentials: true,
+		MaxAge:           12 * time.Hour,
+	}))
 
 	// 注册路由与接口
 	// 静态文件托管
@@ -57,6 +57,6 @@ func main() {
 	r.POST("/api/v1/photos", api.HttpPostPhotos)
 	r.POST("/api/v1/avatars", api.HttpPostAvatars)
 	r.GET("/api/v1/ws", ws.WsSpace)
-	
+
 	r.Run(port)
 }

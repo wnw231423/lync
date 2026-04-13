@@ -20,21 +20,24 @@ func HttpHello(c *gin.Context) {
 	})
 }
 
-type PostSpacesRequest struct {
-	UserID    string `json:"user_id" binding:"required"`
-	SpaceID   string `json:"space_id" binding:"required"`
-	SpaceName string `json:"space_name"`
-}
-
 func HttpPostSpaces(c *gin.Context) {
-	var req PostSpacesRequest
+	userID := c.GetHeader("X-User-Id")
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "X-User-Id header is required"})
+		return
+	}
+
+	var req struct {
+		SpaceID   string `json:"space_id" binding:"required"`
+		SpaceName string `json:"space_name"`
+	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	err := db.WithTx(func(tx *gorm.DB) error {
-		return spaces.EnsureBinding(tx, req.UserID, req.SpaceID, req.SpaceName)
+		return spaces.EnsureBinding(tx, userID, req.SpaceID, req.SpaceName)
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -44,14 +47,15 @@ func HttpPostSpaces(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"ok":       true,
 		"space_id": req.SpaceID,
-		"user_id":  req.UserID,
+		"user_id":  userID,
 	})
 }
 
 func HttpGetSync(c *gin.Context) {
-	spaceID := c.Query("space_id")
-	if spaceID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "space_id is required"})
+	userID := c.GetHeader("X-User-Id")
+	spaceID := c.GetHeader("X-Space-Id")
+	if userID == "" || spaceID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "X-User-Id and X-Space-Id headers are required"})
 		return
 	}
 
@@ -85,6 +89,13 @@ func HttpGetSync(c *gin.Context) {
 }
 
 func HttpPostSync(c *gin.Context) {
+	userID := c.GetHeader("X-User-Id")
+	spaceID := c.GetHeader("X-Space-Id")
+	if userID == "" || spaceID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "X-User-Id and X-Space-Id headers are required"})
+		return
+	}
+
 	lastPulledAt := int64(0)
 	if raw := c.Query("last_pulled_at"); raw != "" {
 		parsed, err := strconv.ParseInt(raw, 10, 64)
@@ -132,6 +143,13 @@ func HttpPostSync(c *gin.Context) {
 }
 
 func HttpPostPhotos(c *gin.Context) {
+	userID := c.GetHeader("X-User-Id")
+	spaceID := c.GetHeader("X-Space-Id")
+	if userID == "" || spaceID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "X-User-Id and X-Space-Id headers are required"})
+		return
+	}
+
 	remoteURL, status, err := upload.SavePhotoFromForm(c)
 	if err != nil {
 		c.JSON(status, gin.H{"error": err.Error()})
@@ -141,6 +159,13 @@ func HttpPostPhotos(c *gin.Context) {
 }
 
 func HttpPostAvatars(c *gin.Context) {
+	userID := c.GetHeader("X-User-Id")
+	spaceID := c.GetHeader("X-Space-Id")
+	if userID == "" || spaceID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "X-User-Id and X-Space-Id headers are required"})
+		return
+	}
+
 	remoteURL, status, err := upload.SaveAvatarFromForm(c)
 	if err != nil {
 		c.JSON(status, gin.H{"error": err.Error()})

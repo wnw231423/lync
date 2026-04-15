@@ -137,12 +137,6 @@ export default function ProfilePage() {
               </View>
             </View>
 
-            <View style={styles.noteCard}>
-              <Text style={styles.noteText}>
-                头像会根据昵称自动生成，不再单独上传头像。
-              </Text>
-            </View>
-
             <View style={styles.editorBlock}>
               <TextInput
                 value={nicknameInput}
@@ -275,20 +269,6 @@ const styles = StyleSheet.create({
     color: profilePalette.muted,
     fontSize: 12,
     fontWeight: "600",
-  },
-  noteCard: {
-    marginTop: 18,
-    borderRadius: 18,
-    backgroundColor: profilePalette.surfaceRaised,
-    borderWidth: 1,
-    borderColor: profilePalette.border,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-  },
-  noteText: {
-    color: profilePalette.muted,
-    fontSize: 13,
-    lineHeight: 20,
   },
   editorBlock: {
     marginTop: 18,

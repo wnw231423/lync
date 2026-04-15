@@ -44,6 +44,7 @@ import {
   readLastSpaceCode,
   saveLastSpaceCode,
 } from "@/lib/spaceSession";
+import { isSpaceDisbanded } from "@/lib/disbandedSpaces";
 import {
   assignModelId,
   assignTimestamps,
@@ -974,6 +975,19 @@ export function SpaceWorkspaceScreen({
     }
     if (!nextSpaceName) {
       Alert.alert("加入失败", "请按“空间名_ID号”的格式输入分享口令。");
+      return;
+    }
+
+    if (await isSpaceDisbanded(nextSpaceId)) {
+      Alert.alert("加入失败", "该空间已解散。");
+      return;
+    }
+
+    const alreadyJoined = joinedSpaces.some(
+      (item) => item.id === nextSpaceId || item.code === nextSpaceId,
+    );
+    if (alreadyJoined) {
+      Alert.alert("加入失败", "该空间已加入。");
       return;
     }
 

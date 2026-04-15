@@ -8,6 +8,7 @@ import Post from "@/model/Post";
 import Space from "@/model/Space";
 import SpaceMember from "@/model/SpaceMember";
 import User from "@/model/User";
+import { markSpaceAsDisbanded } from "@/lib/disbandedSpaces";
 import { createUlid, nowTimestamp } from "@/lib/ids";
 import {
   assignModelId,
@@ -426,6 +427,8 @@ export async function disbandSpaceLocally(spaceId: string) {
       await space.markAsDeleted();
     }
   });
+
+  await markSpaceAsDisbanded(spaceId);
 
   return true;
 }

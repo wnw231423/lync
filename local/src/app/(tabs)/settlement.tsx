@@ -1,4 +1,4 @@
-// 空间结算页：根据账单记录计算成员之间的最少转账方案。
+// 空间结算页：根据本地账单和本地分摊设置，计算成员之间最少的转账方案。
 import { Q } from "@nozbe/watermelondb";
 import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useCallback, useMemo, useState } from "react";
@@ -11,21 +11,22 @@ import {
   View,
 } from "react-native";
 import { SoftIconBadge } from "@/components/SoftIconBadge";
-import { database } from "@/model";
-import Expense from "@/model/Expense";
+import { readExpenseSplitSelections } from "@/lib/expenseSplitStore";
 import {
   getSpaceSnapshotFromDb,
   type SpaceData,
 } from "@/features/travel/spaceDb";
 import { ensureCurrentUserProfileInDb } from "@/features/travel/userDb";
+import { database } from "@/model";
+import Expense from "@/model/Expense";
 
-// LedgerExpense 是结算算法真正需要的最小账单信息。
 type LedgerExpense = {
+  id: string;
   amountYuan: number;
   payerId: string;
+  participantIds: string[];
 };
 
-// Settlement 描述一笔最终需要执行的转账路径。
 type Settlement = {
   fromId: string;
   toId: string;
@@ -36,19 +37,14 @@ const statPalette = {
   background: "#F4FBF6",
   surface: "rgba(255,255,255,0.78)",
   panel: "#FFFFFF",
-  panelSoft: "#F7FCF9",
   border: "#DDEDE3",
-  borderStrong: "#C8DDCF",
   text: "#1E2438",
   muted: "#6F7897",
-  softText: "#9AA4C0",
   primary: "#60C28E",
-  secondary: "#3E9E6C",
-  success: "#34D399",
   shadow: "#BFDCCC",
 };
 
-// calcSettlements 会把所有成员的收支差额压缩成尽量少的转账方案。
+// calcSettlements 会先计算每个人“实际支付”和“应承担”的差额，再压缩成最少转账方案。
 function calcSettlements(
   memberIds: string[],
   expenses: LedgerExpense[],
@@ -57,24 +53,40 @@ function calcSettlements(
     return [];
   }
 
-  // paid 先汇总每位成员实际垫付了多少钱。
   const paid: Record<string, number> = {};
+  const owed: Record<string, number> = {};
   memberIds.forEach((memberId) => {
     paid[memberId] = 0;
+    owed[memberId] = 0;
   });
 
-  const total = expenses.reduce((acc, item) => acc + item.amountYuan, 0);
   expenses.forEach((expense) => {
+    if (!expense.payerId || !memberIds.includes(expense.payerId)) {
+      return;
+    }
+
     paid[expense.payerId] = (paid[expense.payerId] ?? 0) + expense.amountYuan;
+    const participants = expense.participantIds.filter((id) =>
+      memberIds.includes(id),
+    );
+    const finalParticipants =
+      participants.length > 0 ? participants : [...memberIds];
+    const share = expense.amountYuan / finalParticipants.length;
+
+    finalParticipants.forEach((participantId) => {
+      owed[participantId] = Number(
+        ((owed[participantId] ?? 0) + share).toFixed(2),
+      );
+    });
   });
 
-  // share 是所有成员理论上应当平均承担的金额。
-  const share = total / memberIds.length;
   const creditors: { user: string; amount: number }[] = [];
   const debtors: { user: string; amount: number }[] = [];
 
   memberIds.forEach((memberId) => {
-    const net = Number(((paid[memberId] ?? 0) - share).toFixed(2));
+    const net = Number(
+      ((paid[memberId] ?? 0) - (owed[memberId] ?? 0)).toFixed(2),
+    );
     if (net > 0) {
       creditors.push({ user: memberId, amount: net });
     } else if (net < 0) {
@@ -86,12 +98,12 @@ function calcSettlements(
   debtors.sort((a, b) => b.amount - a.amount);
 
   const result: Settlement[] = [];
-  let i = 0;
-  let j = 0;
+  let debtIndex = 0;
+  let creditIndex = 0;
 
-  while (i < debtors.length && j < creditors.length) {
-    const debt = debtors[i];
-    const credit = creditors[j];
+  while (debtIndex < debtors.length && creditIndex < creditors.length) {
+    const debt = debtors[debtIndex];
+    const credit = creditors[creditIndex];
     const amount = Number(Math.min(debt.amount, credit.amount).toFixed(2));
 
     if (amount > 0) {
@@ -102,37 +114,38 @@ function calcSettlements(
     credit.amount = Number((credit.amount - amount).toFixed(2));
 
     if (debt.amount <= 0.009) {
-      i += 1;
+      debtIndex += 1;
     }
     if (credit.amount <= 0.009) {
-      j += 1;
+      creditIndex += 1;
     }
   }
 
   return result;
 }
 
-// SettlementPage 用来展示当前空间里谁该向谁转账结算。
 export default function SettlementPage() {
   const { code } = useLocalSearchParams<{ code?: string }>();
   const spaceCode = typeof code === "string" ? code : "";
 
-  // space 保存当前空间快照，用来拿成员关系和用户昵称。
   const [space, setSpace] = useState<SpaceData | null>(null);
-  // dbExpenses 是从本地数据库读取出的结算输入数据。
   const [dbExpenses, setDbExpenses] = useState<LedgerExpense[]>([]);
 
-  // loadDbExpenses 读取规范化账单数据，供结算算法计算使用。
   const loadDbExpenses = useCallback(async (spaceId: string) => {
     const collection = database.collections.get<Expense>("expenses");
-    const records = await collection
-      .query(Q.where("space_id", spaceId), Q.sortBy("created_at", Q.desc))
-      .fetch();
+    const [records, splitMap] = await Promise.all([
+      collection
+        .query(Q.where("space_id", spaceId), Q.sortBy("created_at", Q.desc))
+        .fetch(),
+      readExpenseSplitSelections(spaceId),
+    ]);
 
     setDbExpenses(
       records.map((item) => ({
+        id: item.id,
         amountYuan: item.amount / 100,
         payerId: item.payerId || "",
+        participantIds: splitMap[item.id] ?? [],
       })),
     );
   }, []);
@@ -158,32 +171,19 @@ export default function SettlementPage() {
     }, [spaceCode, loadDbExpenses]),
   );
 
-  // settlements 是经算法压缩后的最少转账方案。
-  const settlements = useMemo(() => {
-    if (!space) {
-      return [];
-    }
-
-    const memberIds = space.spaceMembers.map((item) => item.user_id);
-    return calcSettlements(memberIds, dbExpenses);
-  }, [space, dbExpenses]);
-
-  // totalTransfer 方便页面顶部快速展示总共需要转账多少金额。
-  const totalTransfer = useMemo(
-    () => settlements.reduce((sum, item) => sum + item.amount, 0),
-    [settlements],
-  );
-
-  // memberUsers 用来把结算结果里的用户 id 映射回可读昵称。
   const memberUsers = useMemo(() => {
     if (!space) {
       return [];
     }
 
     const memberIds = new Set(space.spaceMembers.map((item) => item.user_id));
-
     return space.users.filter((user) => memberIds.has(user.id));
   }, [space]);
+
+  const memberIds = useMemo(
+    () => memberUsers.map((user) => user.id),
+    [memberUsers],
+  );
 
   const userNameById = useMemo(
     () =>
@@ -191,6 +191,16 @@ export default function SettlementPage() {
         memberUsers.map((user) => [user.id, user.nickname || "未命名成员"]),
       ),
     [memberUsers],
+  );
+
+  const settlements = useMemo(
+    () => calcSettlements(memberIds, dbExpenses),
+    [dbExpenses, memberIds],
+  );
+
+  const totalTransfer = useMemo(
+    () => settlements.reduce((sum, item) => sum + item.amount, 0),
+    [settlements],
   );
 
   const memberCount = memberUsers.length;
@@ -205,7 +215,7 @@ export default function SettlementPage() {
           <View>
             <Text style={styles.title}>平摊结算</Text>
             <Text style={styles.subtitle}>
-              用最少的转账次数完成当前空间的费用结清。
+              根据本地账单和分摊设置，计算当前空间的结算结果。
             </Text>
           </View>
           <Pressable
@@ -259,7 +269,7 @@ export default function SettlementPage() {
             />
             <Text style={styles.emptyTitle}>当前无需转账</Text>
             <Text style={styles.emptyText}>
-              账目已经平衡，大家可以轻松继续协作。
+              目前的账单已经平衡，或者还没有形成需要结算的记录。
             </Text>
           </View>
         ) : (
@@ -281,7 +291,7 @@ export default function SettlementPage() {
                     {userNameById.get(item.toId) || "成员"}
                   </Text>
                   <Text style={styles.subText}>
-                    建议当面确认或备注本次空间结算。
+                    这条结果已经把本地设置的“部分成员AA”一起考虑进来了。
                   </Text>
                 </View>
               </View>
@@ -318,7 +328,7 @@ const styles = StyleSheet.create({
     color: statPalette.muted,
     fontSize: 14,
     lineHeight: 22,
-    maxWidth: 250,
+    maxWidth: 260,
   },
   backButton: {
     borderRadius: 999,
@@ -368,55 +378,56 @@ const styles = StyleSheet.create({
   },
   summaryGrid: {
     marginTop: 18,
-    flexDirection: "row",
     gap: 12,
   },
   summaryItem: {
-    flex: 1,
     borderRadius: 22,
     backgroundColor: "rgba(255,255,255,0.92)",
-    paddingHorizontal: 16,
-    paddingVertical: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
     borderWidth: 1,
     borderColor: statPalette.border,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
     shadowColor: "#FFFFFF",
     shadowOpacity: 0.9,
-    shadowRadius: 8,
-    shadowOffset: { width: -3, height: -3 },
+    shadowRadius: 10,
+    shadowOffset: { width: -4, height: -4 },
+    elevation: 2,
   },
   summaryLabel: {
+    flex: 1,
     color: statPalette.muted,
     fontSize: 13,
     fontWeight: "600",
   },
   summaryValue: {
-    marginTop: 8,
     color: statPalette.text,
-    fontSize: 20,
+    fontSize: 16,
     fontWeight: "800",
   },
   emptyCard: {
     borderRadius: 28,
     backgroundColor: statPalette.surface,
-    paddingHorizontal: 22,
-    paddingVertical: 30,
-    alignItems: "center",
+    paddingHorizontal: 18,
+    paddingVertical: 22,
     borderWidth: 1,
     borderColor: statPalette.border,
+    alignItems: "center",
+    gap: 12,
     shadowColor: statPalette.shadow,
     shadowOpacity: 0.14,
-    shadowRadius: 22,
-    shadowOffset: { width: 0, height: 12 },
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 10 },
     elevation: 4,
   },
   emptyTitle: {
-    marginTop: 16,
     color: statPalette.text,
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: "800",
   },
   emptyText: {
-    marginTop: 8,
     color: statPalette.muted,
     fontSize: 14,
     lineHeight: 22,
@@ -433,31 +444,29 @@ const styles = StyleSheet.create({
     shadowRadius: 22,
     shadowOffset: { width: 0, height: 12 },
     elevation: 4,
+    gap: 16,
   },
   cardTop: {
     flexDirection: "row",
+    alignItems: "flex-start",
     gap: 12,
-    alignItems: "center",
   },
-  cardTextWrap: {
-    flex: 1,
-  },
+  cardTextWrap: { flex: 1 },
   mainText: {
     color: statPalette.text,
-    fontSize: 16,
-    fontWeight: "800",
-    lineHeight: 24,
+    fontSize: 17,
+    fontWeight: "700",
+    lineHeight: 26,
   },
   subText: {
-    marginTop: 6,
+    marginTop: 8,
     color: statPalette.muted,
     fontSize: 13,
     lineHeight: 20,
   },
   amountText: {
-    marginTop: 18,
     color: statPalette.primary,
-    fontSize: 24,
+    fontSize: 28,
     fontWeight: "800",
   },
 });

@@ -67,7 +67,7 @@ type WsEnvelope = {
   timestamp?: number;
 };
 
-function buildMapHtml(markers: MemberMarker[]) {
+function buildMapHtml(markers: MemberMarker[], baiduMapAk: string) {
   const safeMarkers = JSON.stringify(markers);
   return `
 <!DOCTYPE html>
@@ -78,10 +78,6 @@ function buildMapHtml(markers: MemberMarker[]) {
       name="viewport"
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
     />
-    <link
-      rel="stylesheet"
-      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-    />
     <style>
       html, body, #map {
         margin: 0;
@@ -90,57 +86,99 @@ function buildMapHtml(markers: MemberMarker[]) {
         height: 100%;
         background: #eef8f1;
       }
-      .leaflet-container {
+      #map {
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        background: #eef8f1;
-      }
-      .marker-dot {
-        width: 18px;
-        height: 18px;
-        border-radius: 9px;
-        border: 3px solid #ffffff;
-        box-shadow: 0 8px 18px rgba(15, 23, 42, 0.18);
       }
     </style>
   </head>
   <body>
     <div id="map"></div>
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://api.map.baidu.com/api?v=3.0&ak=${baiduMapAk}"></script>
     <script>
       const markers = ${safeMarkers};
-      const defaultCenter = markers.length
-        ? [markers[0].latitude, markers[0].longitude]
-        : [31.2304, 121.4737];
-      const map = L.map("map", {
-        zoomControl: false,
-        attributionControl: false,
-      }).setView(defaultCenter, markers.length > 1 ? 12 : 14);
-
-      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        maxZoom: 19,
-      }).addTo(map);
-
-      const bounds = [];
-      markers.forEach((marker) => {
-        const color = marker.isCurrentUser ? "#10B981" : "#2563EB";
-        const icon = L.divIcon({
-          className: "",
-          html: '<div class="marker-dot" style="background:' + color + ';"></div>',
-          iconSize: [18, 18],
-          iconAnchor: [9, 9],
-        });
-        const leafletMarker = L.marker([marker.latitude, marker.longitude], {
-          icon,
-        }).addTo(map);
-        leafletMarker.bindTooltip(
-          marker.name + (marker.isCurrentUser ? "（我）" : ""),
-          { direction: "top", offset: [0, -8] }
-        );
-        bounds.push([marker.latitude, marker.longitude]);
+      const fallbackPoint = new BMap.Point(121.4737, 31.2304);
+      const map = new BMap.Map("map", { enableMapClick: false });
+      map.centerAndZoom(fallbackPoint, 12);
+      map.enableScrollWheelZoom(true);
+      map.setMapStyleV2({
+        styleJson: [
+          { featureType: "water", elementType: "all", stylers: { color: "#d7f4e1" } },
+          { featureType: "land", elementType: "all", stylers: { color: "#f5fbf7" } },
+          { featureType: "highway", elementType: "all", stylers: { color: "#c7ead4" } },
+          { featureType: "arterial", elementType: "all", stylers: { color: "#ffffff" } },
+          { featureType: "local", elementType: "all", stylers: { color: "#ffffff" } },
+          { featureType: "building", elementType: "all", stylers: { color: "#edf7f0" } },
+          { featureType: "label", elementType: "all", stylers: { color: "#475569" } }
+        ]
       });
 
-      if (bounds.length > 1) {
-        map.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
+      function addMarkers(convertedMarkers) {
+        if (!convertedMarkers.length) {
+          return;
+        }
+
+        const viewportPoints = [];
+        convertedMarkers.forEach((marker) => {
+          const point = new BMap.Point(marker.longitude, marker.latitude);
+          viewportPoints.push(point);
+
+          const markerNode = new BMap.Marker(point);
+          map.addOverlay(markerNode);
+
+          const label = new BMap.Label(
+            marker.name + (marker.isCurrentUser ? "（我）" : ""),
+            {
+              position: point,
+              offset: new BMap.Size(12, -26),
+            }
+          );
+          label.setStyle({
+            color: "#0F172A",
+            border: "1px solid #DDEDE3",
+            borderRadius: "999px",
+            backgroundColor: "#FFFFFF",
+            padding: "4px 8px",
+            fontSize: "12px",
+            fontWeight: "600",
+            boxShadow: "0 8px 18px rgba(15, 23, 42, 0.12)",
+          });
+          map.addOverlay(label);
+
+          const circle = new BMap.Circle(point, 55, {
+            strokeColor: marker.isCurrentUser ? "#10B981" : "#2563EB",
+            strokeWeight: 3,
+            strokeOpacity: 0.85,
+            fillColor: marker.isCurrentUser ? "#10B981" : "#2563EB",
+            fillOpacity: 0.18,
+          });
+          map.addOverlay(circle);
+        });
+
+        if (viewportPoints.length === 1) {
+          map.centerAndZoom(viewportPoints[0], 15);
+        } else {
+          map.setViewport(viewportPoints, { margins: [52, 52, 52, 52] });
+        }
+      }
+
+      if (markers.length) {
+        const gpsPoints = markers.map(
+          (marker) => new BMap.Point(marker.longitude, marker.latitude)
+        );
+        const convertor = new BMap.Convertor();
+        convertor.translate(gpsPoints, 1, 5, function (data) {
+          if (!data || data.status !== 0 || !Array.isArray(data.points)) {
+            addMarkers(markers);
+            return;
+          }
+
+          const convertedMarkers = markers.map((marker, index) => ({
+            ...marker,
+            longitude: data.points[index]?.lng ?? marker.longitude,
+            latitude: data.points[index]?.lat ?? marker.latitude,
+          }));
+          addMarkers(convertedMarkers);
+        });
       }
     </script>
   </body>
@@ -208,6 +246,10 @@ export default function LocationPage() {
   const [markersById, setMarkersById] = useState<Record<string, MemberMarker>>(
     {},
   );
+  const baiduMapAk = process.env.EXPO_PUBLIC_BAIDU_MAP_AK?.trim() || "";
+  const baiduMapOrigin =
+    process.env.EXPO_PUBLIC_BAIDU_MAP_WEB_ORIGIN?.trim() ||
+    "https://travel-map.local";
 
   const wsRef = useRef<WebSocket | null>(null);
   const promptShownRef = useRef(false);
@@ -482,7 +524,7 @@ export default function LocationPage() {
     );
   }
 
-  const mapHtml = buildMapHtml(markers);
+  const mapHtml = buildMapHtml(markers, baiduMapAk);
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -506,7 +548,15 @@ export default function LocationPage() {
           </Pressable>
         </View>
 
-        {permissionState === "denied" ? (
+        {!baiduMapAk ? (
+          <View style={styles.permissionCard}>
+            <Text style={styles.permissionTitle}>缺少百度地图 AK</Text>
+            <Text style={styles.permissionText}>
+              请先在 local/.env 中配置
+              EXPO_PUBLIC_BAIDU_MAP_AK，然后重新启动应用。
+            </Text>
+          </View>
+        ) : permissionState === "denied" ? (
           <View style={styles.permissionCard}>
             <Text style={styles.permissionTitle}>未开启定位权限</Text>
             <Text style={styles.permissionText}>
@@ -527,7 +577,7 @@ export default function LocationPage() {
             <View style={styles.mapCard}>
               <WebView
                 originWhitelist={["*"]}
-                source={{ html: mapHtml }}
+                source={{ html: mapHtml, baseUrl: baiduMapOrigin }}
                 style={styles.webview}
                 javaScriptEnabled
                 domStorageEnabled

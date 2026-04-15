@@ -331,3 +331,19 @@ export async function syncMockSpaceToDatabase(space: SpaceData) {
     }
   });
 }
+
+// ensureMockSpaceSeeded 只在本地库里还没有这条空间主记录时，才把 mock 快照写入数据库。
+// 这样做可以避免接入真实同步后，每次回到页面又被旧 mock 覆盖掉刚拉下来的服务端数据。
+export async function ensureMockSpaceSeeded(space: SpaceData) {
+  const spaceCollection = database.collections.get<Space>("spaces");
+  try {
+    const existing = await spaceCollection.find(space.space.id);
+    if (existing?._raw?._status !== "deleted") {
+      return;
+    }
+  } catch {
+    // 记录不存在时继续执行首次 seed。
+  }
+
+  await syncMockSpaceToDatabase(space);
+}

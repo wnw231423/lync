@@ -13,7 +13,7 @@ import {
 import { SoftIconBadge } from "@/components/SoftIconBadge";
 import { database } from "@/model";
 import Expense from "@/model/Expense";
-import { syncMockSpaceToDatabase } from "@/features/travel/dbSync";
+import { ensureMockSpaceSeeded } from "@/features/travel/dbSync";
 import { getSpaceByCode, type SpaceData } from "@/features/travel/mockApp";
 
 // LedgerExpense 是结算算法真正需要的最小账单信息。
@@ -148,7 +148,7 @@ export default function SettlementPage() {
       setSpace(nextSpace);
       if (nextSpace) {
         void (async () => {
-          await syncMockSpaceToDatabase(nextSpace);
+          await ensureMockSpaceSeeded(nextSpace);
           await loadDbExpenses(nextSpace.id);
         })();
       } else {

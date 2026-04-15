@@ -19,6 +19,8 @@ import {
   Keyboard,
   KeyboardAvoidingView,
   Modal,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
   Platform,
   Pressable,
   ScrollView,
@@ -80,6 +82,10 @@ type ClipboardModule = {
   setStringAsync: (value: string) => Promise<boolean>;
 };
 
+type ScrollableFeedHandle = {
+  scrollTo: (options: { x?: number; y?: number; animated?: boolean }) => void;
+};
+
 // FeedComment / FeedPostImage / FeedPost 是大厅动态流真正使用的轻量视图模型。
 // 这里会把数据库原始记录和页面需要的展示字段重新整理成更好用的结构。
 type FeedComment = {
@@ -134,7 +140,7 @@ function normalizeSpaceCode(code?: string) {
 
 // clampSpaceNameInput 在输入阶段先按字符数限制空间名称，避免弹窗里超长。
 function clampSpaceNameInput(value: string) {
-  return Array.from(value.replaceAll("_", "").trim()).slice(0, 10).join("");
+  return Array.from(value.replaceAll("_", "").trim()).slice(0, 8).join("");
 }
 
 function buildDefaultSpaceName(ownerName: string) {
@@ -310,7 +316,7 @@ export function SpaceWorkspaceScreen({
   initialCode = "",
 }: SpaceWorkspaceScreenProps) {
   const normalizedInitialCode = normalizeSpaceCode(initialCode);
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
   const sidebarDockWidth = 28;
   const sidebarWidth =
     width >= 900
@@ -358,9 +364,13 @@ export function SpaceWorkspaceScreen({
   const currentProfileRef = useRef<UserProfileData | null>(null);
   const sidebarProgress = useRef(new Animated.Value(0)).current;
   const scrollY = useRef(new Animated.Value(0)).current;
+  const feedScrollRef = useRef<ScrollableFeedHandle | null>(null);
   const activeSpaceCodeRef = useRef(normalizedInitialCode);
   const compactHeaderVisibleRef = useRef(false);
   const feedSectionStartRef = useRef(240);
+  const feedScrollOffsetRef = useRef(0);
+  const keyboardHeightRef = useRef(0);
+  const focusedCommentPostIdRef = useRef<string | null>(null);
   const commentInputRefs = useRef<
     Record<string, ComponentRef<typeof TextInput> | null>
   >({});
@@ -389,6 +399,61 @@ export function SpaceWorkspaceScreen({
       mass: 0.9,
     }).start();
   }, [sidebarProgress, sidebarVisible]);
+
+  const ensureCommentInputVisible = useCallback(
+    (postId: string) => {
+      const input = commentInputRefs.current[postId];
+      if (!input?.measureInWindow) {
+        return;
+      }
+
+      const delay = Platform.OS === "android" ? 180 : 90;
+      setTimeout(() => {
+        input.measureInWindow((_x, y, _width, inputHeight) => {
+          const keyboardHeight = keyboardHeightRef.current;
+          if (keyboardHeight <= 0) {
+            return;
+          }
+
+          const safeGap = 18;
+          const visibleBottom = height - keyboardHeight - safeGap;
+          const inputBottom = y + inputHeight;
+          if (inputBottom <= visibleBottom) {
+            return;
+          }
+
+          const delta = inputBottom - visibleBottom + 14;
+          feedScrollRef.current?.scrollTo?.({
+            y: Math.max(feedScrollOffsetRef.current + delta, 0),
+            animated: true,
+          });
+        });
+      }, delay);
+    },
+    [height],
+  );
+
+  useEffect(() => {
+    const showEvent =
+      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hideEvent =
+      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+
+    const showSubscription = Keyboard.addListener(showEvent, (event) => {
+      keyboardHeightRef.current = event.endCoordinates.height;
+      if (focusedCommentPostIdRef.current) {
+        ensureCommentInputVisible(focusedCommentPostIdRef.current);
+      }
+    });
+    const hideSubscription = Keyboard.addListener(hideEvent, () => {
+      keyboardHeightRef.current = 0;
+    });
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, [ensureCommentInputVisible]);
 
   // loadDbPosts 会把 posts / photos / comments 三张表重新拼装成大厅动态流。
   const loadDbPosts = useCallback(async (spaceId: string) => {
@@ -1162,6 +1227,20 @@ export function SpaceWorkspaceScreen({
     [currentSpace],
   );
 
+  const onFeedScrollNative = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      feedScrollOffsetRef.current = event.nativeEvent.contentOffset.y;
+      onFeedScroll({
+        nativeEvent: {
+          contentOffset: {
+            y: event.nativeEvent.contentOffset.y,
+          },
+        },
+      });
+    },
+    [onFeedScroll],
+  );
+
   const renderWorkspaceActions = (compact: boolean) =>
     compact ? (
       <View
@@ -1244,10 +1323,10 @@ export function SpaceWorkspaceScreen({
 
   const heroTitleStyle = useMemo(() => {
     const currentNameLength = Array.from(currentSpace?.name ?? "").length;
-    if (currentNameLength >= 10) {
+    if (currentNameLength >= 8) {
       return styles.spaceHeroTitleCompact;
     }
-    if (currentNameLength >= 8) {
+    if (currentNameLength >= 6) {
       return styles.spaceHeroTitleMedium;
     }
     return null;
@@ -1312,6 +1391,10 @@ export function SpaceWorkspaceScreen({
 
               <Animated.ScrollView
                 key={currentSpace?.code ?? "empty-space"}
+                ref={(node) => {
+                  feedScrollRef.current =
+                    (node as unknown as ScrollableFeedHandle | null) ?? null;
+                }}
                 style={styles.feedScroll}
                 contentContainerStyle={styles.feedContent}
                 keyboardShouldPersistTaps="handled"
@@ -1322,7 +1405,7 @@ export function SpaceWorkspaceScreen({
                   [{ nativeEvent: { contentOffset: { y: scrollY } } }],
                   {
                     useNativeDriver: true,
-                    listener: onFeedScroll,
+                    listener: onFeedScrollNative,
                   },
                 )}
               >
@@ -1524,6 +1607,17 @@ export function SpaceWorkspaceScreen({
                                   [post.id]: text,
                                 }))
                               }
+                              onFocus={() => {
+                                focusedCommentPostIdRef.current = post.id;
+                                ensureCommentInputVisible(post.id);
+                              }}
+                              onBlur={() => {
+                                if (
+                                  focusedCommentPostIdRef.current === post.id
+                                ) {
+                                  focusedCommentPostIdRef.current = null;
+                                }
+                              }}
                               multiline
                               textAlignVertical="top"
                             />
@@ -1761,11 +1855,14 @@ export function SpaceWorkspaceScreen({
           onChangeText={(value) =>
             setCreateNameInput(clampSpaceNameInput(value))
           }
-          placeholder="输入空间名称（最多 10 字）"
+          placeholder="输入空间名称（最多 8 字）"
           placeholderTextColor={workspaceTheme.placeholder}
-          maxLength={10}
+          maxLength={8}
           style={styles.dialogInput}
         />
+        <Text style={styles.dialogHelperText}>
+          请输入最多 8 个字的空间名，创建后名称将固定。
+        </Text>
       </CenterDialog>
 
       <CenterDialog

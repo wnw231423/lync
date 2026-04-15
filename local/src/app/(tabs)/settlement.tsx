@@ -308,7 +308,7 @@ const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: statPalette.background },
   scrollContent: {
     paddingHorizontal: 18,
-    paddingTop: 20,
+    paddingTop: 46,
     paddingBottom: 32,
     gap: 18,
   },

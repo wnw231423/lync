@@ -1,99 +1,76 @@
-import React, { useEffect, useState } from "react";
-import { Q } from "@nozbe/watermelondb";
+import { useEffect, useMemo, useState } from "react";
 import { Button, FlatList, StyleSheet, Text, View } from "react-native";
-
 import { database } from "@/model";
 import Expense from "@/model/Expense";
-import Space from "@/model/Space";
-import SpaceMember from "@/model/SpaceMember";
-import User from "@/model/User";
-import { syncSpace } from "@/sync/sync";
+import { createUlid } from "@/lib/ids";
+import { assignModelId } from "@/lib/watermelon";
 
-const DEMO_SPACE_ID = "space_demo_sync";
-const DEMO_USER_ID = "user_demo_sync";
-const DEMO_SPACE_MEMBER_ID = `${DEMO_SPACE_ID}_${DEMO_USER_ID}`;
+// 这几组常量都是数据库冒烟测试页专用的假数据，不参与正式业务流程。
+const DEMO_SPACE_ID = "demo_space_001";
+const DEMO_PAYERS = ["user_a", "user_b", "user_c"];
+const DEMO_EXPENSES = ["酒店", "打车", "晚餐", "门票", "咖啡"];
 
+// DatabaseTestScreen 是一个轻量的 WatermelonDB 手动冒烟测试页。
 export default function DatabaseTestScreen() {
+  // expenses 直接观察 `expenses` 表，方便在测试页实时看到增删结果。
   const [expenses, setExpenses] = useState<Expense[]>([]);
-  const [syncStatus, setSyncStatus] = useState("未同步");
 
   useEffect(() => {
-    const expensesCollection = database.collections.get<Expense>("expenses");
-    const subscription = expensesCollection
-      .query(Q.where("space_id", DEMO_SPACE_ID))
+    const collection = database.collections.get<Expense>("expenses");
+    const subscription = collection
+      .query()
       .observe()
-      .subscribe((data) => {
-        setExpenses(data);
-      });
+      .subscribe((records) => setExpenses(records));
 
     return () => subscription.unsubscribe();
   }, []);
 
+  const total = useMemo(
+    () => expenses.reduce((acc, item) => acc + item.amount, 0),
+    [expenses],
+  );
+
+  // handleAddMockExpense 插入一条随机账单，方便快速检查离线写入是否正常。
   const handleAddMockExpense = async () => {
-    try {
-      await database.write(async () => {
-        await ensureDemoSyncContext();
+    const payerId = DEMO_PAYERS[Math.floor(Math.random() * DEMO_PAYERS.length)];
+    const description =
+      DEMO_EXPENSES[Math.floor(Math.random() * DEMO_EXPENSES.length)];
 
-        const expensesCollection =
-          database.collections.get<Expense>("expenses");
-        await expensesCollection.create((expense) => {
-          expense.spaceId = DEMO_SPACE_ID;
-          expense.payerId = DEMO_USER_ID;
-          expense.amount = Math.floor(Math.random() * 5000) + 1000;
-          expense.description = "离线测试：AA制午餐";
-          expense.createdAt = new Date();
-          expense.updatedAt = new Date();
-        });
+    await database.write(async () => {
+      const collection = database.collections.get<Expense>("expenses");
+      await collection.create((expense) => {
+        assignModelId(expense, createUlid());
+        expense.spaceId = DEMO_SPACE_ID;
+        expense.payerId = payerId;
+        expense.amount = Math.floor(Math.random() * 5000) + 1000;
+        expense.description = `${description}（离线测试）`;
       });
-    } catch (error) {
-      console.error("写入失败:", error);
-    }
+    });
   };
 
+  // handleClearAll 只清空测试数据，不会影响正式业务逻辑。
   const handleClearAll = async () => {
-    try {
-      await database.write(async () => {
-        const expensesCollection =
-          database.collections.get<Expense>("expenses");
-        const allRecords = await expensesCollection
-          .query(Q.where("space_id", DEMO_SPACE_ID))
-          .fetch();
-        const deleteOperations = allRecords.map((record) =>
-          record.prepareMarkAsDeleted(),
-        );
-        await database.batch(...deleteOperations);
-      });
-    } catch (error) {
-      console.error("清空失败:", error);
-    }
-  };
-
-  const handleSyncCurrentSpace = async () => {
-    try {
-      setSyncStatus("同步中...");
-      await syncSpace(DEMO_SPACE_ID);
-      setSyncStatus("同步成功");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "未知同步错误";
-      setSyncStatus(`同步失败: ${message}`);
-      console.error("同步失败:", error);
-    }
+    await database.write(async () => {
+      const collection = database.collections.get<Expense>("expenses");
+      const allRecords = await collection.query().fetch();
+      const deletions = allRecords.map((record) =>
+        record.prepareMarkAsDeleted(),
+      );
+      await database.batch(...deletions);
+    });
   };
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>WatermelonDB 离线测试室</Text>
-      <Text style={styles.subtitle}>当前空间: {DEMO_SPACE_ID}</Text>
-      <Text style={styles.subtitle}>当前记录数: {expenses.length}</Text>
-      <Text style={styles.subtitle}>同步状态: {syncStatus}</Text>
+      <Text style={styles.title}>离线数据库测试</Text>
+      <Text style={styles.subtitle}>当前记录数：{expenses.length}</Text>
+      <Text style={styles.subtitle}>
+        总金额（元）：{(total / 100).toFixed(2)}
+      </Text>
 
       <View style={styles.btnGroup}>
-        <Button title="记一笔账" onPress={handleAddMockExpense} />
-        <Button title="同步当前空间" onPress={handleSyncCurrentSpace} />
-      </View>
-
-      <View style={styles.btnGroup}>
-        <Button title="清空全部" color="red" onPress={handleClearAll} />
+        <Button title="新增一笔账单" onPress={handleAddMockExpense} />
+        <Button title="清空全部记录" color="red" onPress={handleClearAll} />
       </View>
 
       <FlatList
@@ -101,64 +78,19 @@ export default function DatabaseTestScreen() {
         keyExtractor={(item) => item.id}
         renderItem={({ item }) => (
           <View style={styles.item}>
-            <Text>{item.description}</Text>
+            <View>
+              <Text style={styles.desc}>{item.description}</Text>
+              <Text style={styles.meta}>付款人：{item.payerId}</Text>
+              <Text style={styles.meta}>空间：{item.spaceId}</Text>
+            </View>
             <Text style={styles.amount}>
-              ￥{(item.amount / 100).toFixed(2)}
+              ¥ {(item.amount / 100).toFixed(2)}
             </Text>
           </View>
         )}
       />
     </View>
   );
-
-  async function ensureDemoSyncContext() {
-    const usersCollection = database.collections.get<User>("users");
-    const spacesCollection = database.collections.get<Space>("spaces");
-    const spaceMembersCollection =
-      database.collections.get<SpaceMember>("space_members");
-
-    if (!(await findRecordOrNull(usersCollection, DEMO_USER_ID))) {
-      await usersCollection.create((user) => {
-        // Watermelon local create does not expose a typed id setter, so the
-        // demo seed path assigns the sync identity through the raw record.
-        setRawId(user, DEMO_USER_ID);
-        user.nickname = "Local Demo User";
-      });
-    }
-
-    if (!(await findRecordOrNull(spacesCollection, DEMO_SPACE_ID))) {
-      await spacesCollection.create((space) => {
-        setRawId(space, DEMO_SPACE_ID);
-        space.name = "本地同步演示空间";
-      });
-    }
-
-    if (
-      !(await findRecordOrNull(spaceMembersCollection, DEMO_SPACE_MEMBER_ID))
-    ) {
-      await spaceMembersCollection.create((spaceMember) => {
-        setRawId(spaceMember, DEMO_SPACE_MEMBER_ID);
-        spaceMember.spaceId = DEMO_SPACE_ID;
-        spaceMember.userId = DEMO_USER_ID;
-      });
-    }
-  }
-}
-
-async function findRecordOrNull<T extends { id: string }>(
-  collection: { find: (id: string) => Promise<T> },
-  id: string,
-): Promise<T | null> {
-  try {
-    return await collection.find(id);
-  } catch {
-    return null;
-  }
-}
-
-function setRawId(model: object, id: string) {
-  const modelWithRawId = model as { _raw: { id: string } };
-  modelWithRawId._raw.id = id;
 }
 
 const styles = StyleSheet.create({
@@ -173,7 +105,8 @@ const styles = StyleSheet.create({
   btnGroup: {
     flexDirection: "row",
     justifyContent: "space-around",
-    marginBottom: 16,
+    marginBottom: 20,
+    marginTop: 8,
   },
   item: {
     padding: 15,
@@ -183,5 +116,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
   },
+  desc: { fontWeight: "600", color: "#1f2937" },
+  meta: { marginTop: 4, color: "#6b7280", fontSize: 12 },
   amount: { fontWeight: "bold", color: "#e74c3c" },
 });

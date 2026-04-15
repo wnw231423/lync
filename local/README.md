@@ -2,6 +2,12 @@
 
 This is an [Expo](https://expo.dev) project started with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
 
+## Code reading guide
+
+如果你想系统读懂 `local/` 里的页面、数据层和数据库实现，建议先看：
+
+- [`../docs/local-code-guide.md`](../docs/local-code-guide.md)
+
 ## fmt&lint standard
 
 如果使用`vscoce`, 推荐安装以下插件:

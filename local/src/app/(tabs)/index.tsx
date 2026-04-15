@@ -1,23 +1,6 @@
-import { PropsWithChildren } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { SpaceWorkspaceScreen } from "@/features/travel/SpaceWorkspaceScreen";
 
-export const CustomText = ({ children }: PropsWithChildren) => (
-  <Text>{children}</Text>
-);
-
+// HomeScreen 作为 App 主入口，直接进入新的空间工作台布局。
 export default function HomeScreen() {
-  return (
-    <View style={styles.container}>
-      <CustomText>Welcome!</CustomText>
-    </View>
-  );
+  return <SpaceWorkspaceScreen />;
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#fff",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-});

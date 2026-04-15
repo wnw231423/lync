@@ -33,7 +33,7 @@ import { database } from "@/model";
 import Comment from "@/model/Comment";
 import Photo from "@/model/Photo";
 import Post from "@/model/Post";
-import { createUlid, nowTimestamp } from "@/lib/ids";
+import { createUlid, isUlid, nowTimestamp } from "@/lib/ids";
 import {
   isRemoteImageUri,
   saveImageToAppRelativePath,
@@ -49,19 +49,15 @@ import {
   assignTimestamps,
   dateToTimestamp,
 } from "@/lib/watermelon";
-import { ensureMockSpaceSeeded } from "@/features/travel/dbSync";
 import {
-  createSpaceForCurrentUser,
-  disbandSpaceByCode,
-  getCurrentUser,
-  getSpaceByCode,
-  joinSpaceByCode,
-  leaveSpaceByCode,
-  listJoinedSpacesForCurrentUser,
-  renameSpaceByCode,
+  createSpaceLocally,
+  disbandSpaceLocally,
+  getSpaceSnapshotFromDb,
+  leaveSpaceLocally,
+  listJoinedSpacesFromDb,
   type JoinedSpaceSummary,
   type SpaceData,
-} from "@/features/travel/mockApp";
+} from "@/features/travel/spaceDb";
 import {
   ensureCurrentUserProfileInDb,
   getCurrentUserProfileFromDb,
@@ -137,10 +133,42 @@ function normalizeSpaceCode(code?: string) {
 
 // clampSpaceNameInput 在输入阶段先按字符数限制空间名称，避免弹窗里超长。
 function clampSpaceNameInput(value: string) {
-  return Array.from(value).slice(0, 10).join("");
+  return Array.from(value.replaceAll("_", "").trim()).slice(0, 10).join("");
+}
+
+function buildDefaultSpaceName(ownerName: string) {
+  const cleanOwnerName = Array.from(ownerName.trim() || "我")
+    .slice(0, 4)
+    .join("");
+  return clampSpaceNameInput(`${cleanOwnerName}的空间`);
 }
 
 // formatFeedTime 把动态时间统一格式化成短时间文案。
+function formatSharedSpaceToken(spaceName: string, spaceId: string) {
+  const cleanName = clampSpaceNameInput(spaceName);
+  const cleanId = normalizeSpaceCode(spaceId);
+  if (!cleanName || !cleanId) {
+    return "";
+  }
+  return `${cleanName}_${cleanId}`;
+}
+
+function parseSharedSpaceToken(input: string) {
+  const cleanInput = input.trim();
+  const separatorIndex = cleanInput.lastIndexOf("_");
+  if (separatorIndex <= 0 || separatorIndex >= cleanInput.length - 1) {
+    return null;
+  }
+
+  const name = clampSpaceNameInput(cleanInput.slice(0, separatorIndex));
+  const id = normalizeSpaceCode(cleanInput.slice(separatorIndex + 1));
+  if (!name || !id) {
+    return null;
+  }
+
+  return { name, id };
+}
+
 function formatFeedTime(ts: number) {
   return new Date(ts).toLocaleString("zh-CN", {
     month: "2-digit",
@@ -194,36 +222,21 @@ function getClipboardModule() {
   return clipboardModuleCache;
 }
 
-function getFallbackName(name: string) {
-  return name.trim().slice(-1) || "空";
-}
-
 // UserAvatar 统一处理大厅里的头像渲染和兜底首字显示。
 function UserAvatar({ uri, name, size = 40, textSize = 16 }: UserAvatarProps) {
-  const [failed, setFailed] = useState(false);
-  const fallback = getFallbackName(name);
-
-  if (!uri || failed) {
-    return (
-      <View
-        style={[
-          styles.avatarFallback,
-          { width: size, height: size, borderRadius: size / 2 },
-        ]}
-      >
-        <Text style={[styles.avatarFallbackText, { fontSize: textSize }]}>
-          {fallback}
-        </Text>
-      </View>
-    );
-  }
+  const fallback = Array.from(name.trim())[0] || "空";
 
   return (
-    <Image
-      source={{ uri }}
-      style={{ width: size, height: size, borderRadius: size / 2 }}
-      onError={() => setFailed(true)}
-    />
+    <View
+      style={[
+        styles.avatarFallback,
+        { width: size, height: size, borderRadius: size / 2 },
+      ]}
+    >
+      <Text style={[styles.avatarFallbackText, { fontSize: textSize }]}>
+        {fallback}
+      </Text>
+    </View>
   );
 }
 
@@ -296,7 +309,6 @@ export function SpaceWorkspaceScreen({
   initialCode = "",
 }: SpaceWorkspaceScreenProps) {
   const normalizedInitialCode = normalizeSpaceCode(initialCode);
-  const currentUser = getCurrentUser();
   const { width } = useWindowDimensions();
   const sidebarDockWidth = 28;
   const sidebarWidth =
@@ -333,15 +345,16 @@ export function SpaceWorkspaceScreen({
   const [commentInputs, setCommentInputs] = useState<Record<string, string>>(
     {},
   );
+  const [createModalVisible, setCreateModalVisible] = useState(false);
+  const [createNameInput, setCreateNameInput] = useState("");
   const [joinModalVisible, setJoinModalVisible] = useState(false);
-  const [joinCodeInput, setJoinCodeInput] = useState("");
-  const [renameModalVisible, setRenameModalVisible] = useState(false);
-  const [renameInput, setRenameInput] = useState("");
+  const [joinTokenInput, setJoinTokenInput] = useState("");
   const [createdCodeVisible, setCreatedCodeVisible] = useState(false);
   const [createdSpaceCode, setCreatedSpaceCode] = useState("");
   const [shareCodeVisible, setShareCodeVisible] = useState(false);
 
   // 这一组 ref 主要给动画、滚动阈值和评论输入焦点管理使用。
+  const currentProfileRef = useRef<UserProfileData | null>(null);
   const sidebarProgress = useRef(new Animated.Value(0)).current;
   const scrollY = useRef(new Animated.Value(0)).current;
   const activeSpaceCodeRef = useRef(normalizedInitialCode);
@@ -354,6 +367,10 @@ export function SpaceWorkspaceScreen({
   useEffect(() => {
     activeSpaceCodeRef.current = activeSpaceCode;
   }, [activeSpaceCode]);
+
+  useEffect(() => {
+    currentProfileRef.current = currentProfile;
+  }, [currentProfile]);
 
   useEffect(() => {
     compactHeaderVisibleRef.current = false;
@@ -463,15 +480,19 @@ export function SpaceWorkspaceScreen({
 
   // loadSpaceSnapshot 负责切换空间时准备本地展示数据，并刷新最近使用空间记忆。
   const loadSpaceSnapshot = useCallback(
-    async (spaceCode: string) => {
-      const nextSpace = spaceCode ? getSpaceByCode(spaceCode) : null;
+    async (spaceCode: string, profile?: UserProfileData | null) => {
+      const nextSpace = spaceCode
+        ? await getSpaceSnapshotFromDb(
+            spaceCode,
+            profile ?? currentProfileRef.current,
+          )
+        : null;
       setCurrentSpace(nextSpace);
       if (!nextSpace) {
         setDbPosts([]);
         await clearLastSpaceCode();
         return;
       }
-      await ensureMockSpaceSeeded(nextSpace);
       await loadDbPosts(nextSpace.id);
       await saveLastSpaceCode(nextSpace.code);
     },
@@ -482,10 +503,11 @@ export function SpaceWorkspaceScreen({
     async (preferredCode?: string) => {
       setHydrating(true);
       try {
-        await ensureCurrentUserProfileInDb();
-        const profile = await getCurrentUserProfileFromDb();
+        const profile =
+          (await ensureCurrentUserProfileInDb()) ??
+          (await getCurrentUserProfileFromDb());
         setCurrentProfile(profile);
-        const nextJoinedSpaces = listJoinedSpacesForCurrentUser();
+        const nextJoinedSpaces = await listJoinedSpacesFromDb(profile.id);
         setJoinedSpaces(nextJoinedSpaces);
 
         const preferred = normalizeSpaceCode(preferredCode);
@@ -512,7 +534,7 @@ export function SpaceWorkspaceScreen({
           return;
         }
 
-        await loadSpaceSnapshot(resolvedCode);
+        await loadSpaceSnapshot(resolvedCode, profile);
       } finally {
         setHydrating(false);
       }
@@ -535,6 +557,20 @@ export function SpaceWorkspaceScreen({
     }
     void refreshWorkspace(normalizedInitialCode);
   }, [normalizedInitialCode, refreshWorkspace]);
+
+  const currentUserId = currentProfile?.id ?? "";
+  const currentUserName = currentProfile?.nickname || "空间用户";
+
+  const ensureActiveProfile = useCallback(async () => {
+    const profile =
+      currentProfile ??
+      (await ensureCurrentUserProfileInDb()) ??
+      (await getCurrentUserProfileFromDb());
+    if (!currentProfile) {
+      setCurrentProfile(profile);
+    }
+    return profile;
+  }, [currentProfile]);
 
   const sidebarTranslateX = sidebarProgress.interpolate({
     inputRange: [0, 1],
@@ -568,26 +604,17 @@ export function SpaceWorkspaceScreen({
     for (const user of currentSpace?.users ?? []) {
       map.set(user.id, {
         nickname: user.nickname,
-        avatarUrl: user.avatar_local_uri || user.avatar_remote_url || "",
+        avatarUrl: "",
       });
     }
-    map.set(currentUser.id, {
-      nickname: currentProfile?.nickname || currentUser.username,
-      avatarUrl:
-        currentProfile?.avatarDisplayUri ||
-        currentProfile?.avatarLocalUri ||
-        currentProfile?.avatarRemoteUrl ||
-        currentUser.avatarUrl ||
-        "",
-    });
+    if (currentUserId) {
+      map.set(currentUserId, {
+        nickname: currentUserName,
+        avatarUrl: "",
+      });
+    }
     return map;
-  }, [
-    currentProfile,
-    currentSpace,
-    currentUser.avatarUrl,
-    currentUser.id,
-    currentUser.username,
-  ]);
+  }, [currentSpace, currentUserId, currentUserName]);
 
   const activeMembers = useMemo(() => {
     if (!currentSpace) {
@@ -610,13 +637,8 @@ export function SpaceWorkspaceScreen({
     return dbPosts.find((item) => item.id === editingPostId) ?? null;
   }, [dbPosts, editingPostId]);
 
-  const profileName = currentProfile?.nickname || currentUser.username;
-  const profileAvatarUri =
-    currentProfile?.avatarDisplayUri ||
-    currentProfile?.avatarLocalUri ||
-    currentProfile?.avatarRemoteUrl ||
-    currentUser.avatarUrl ||
-    "";
+  const profileName = currentUserName;
+  const profileAvatarUri = "";
 
   const activateSpace = useCallback(
     async (spaceCode: string) => {
@@ -680,19 +702,18 @@ export function SpaceWorkspaceScreen({
     setComposerVisible(true);
   };
 
-  const openRenameModal = () => {
-    if (!currentSpace) {
-      return;
-    }
-    setRenameInput(clampSpaceNameInput(currentSpace.name));
-    setMenuOpen(false);
-    setRenameModalVisible(true);
+  const openCreateSpaceDialog = () => {
+    const suggestedName = buildDefaultSpaceName(currentUserName);
+    setCreateNameInput((current) => current || suggestedName);
+    setCreateModalVisible(true);
   };
 
   const onPublishPost = async () => {
     if (!currentSpace || publishingPost) {
       return;
     }
+
+    const activeProfile = await ensureActiveProfile();
 
     const cleanText = postText.trim();
     const mergedInputUris = Array.from(new Set(selectedImageUris));
@@ -737,7 +758,7 @@ export function SpaceWorkspaceScreen({
             assignModelId(photo, image.id);
             photo.spaceId = currentSpace.id;
             photo.postId = postId;
-            photo.uploaderId = currentUser.id;
+            photo.uploaderId = activeProfile.id;
             photo.localUri = image.localUri;
             photo.remoteUrl = image.remoteUrl;
             photo.shotedAt = new Date(image.shotedAt);
@@ -750,7 +771,7 @@ export function SpaceWorkspaceScreen({
             assignModelId(item, createUlid());
             item.spaceId = currentSpace.id;
             item.content = cleanText;
-            item.commenterId = currentUser.id;
+            item.commenterId = activeProfile.id;
             item.postId = postId;
             item.commentedAt = new Date(createdAt);
             assignTimestamps(item, createdAt, createdAt);
@@ -773,6 +794,8 @@ export function SpaceWorkspaceScreen({
     if (!currentSpace || updatingPostId) {
       return;
     }
+
+    const activeProfile = await ensureActiveProfile();
 
     const uris = Array.from(new Set(await pickImageUrisFromAlbum()));
     if (uris.length === 0) {
@@ -805,7 +828,7 @@ export function SpaceWorkspaceScreen({
             assignModelId(photo, image.id);
             photo.spaceId = currentSpace.id;
             photo.postId = postId;
-            photo.uploaderId = currentUser.id;
+            photo.uploaderId = activeProfile.id;
             photo.localUri = image.localUri;
             photo.remoteUrl = image.remoteUrl;
             photo.shotedAt = new Date(image.shotedAt);
@@ -866,6 +889,8 @@ export function SpaceWorkspaceScreen({
       return;
     }
 
+    const activeProfile = await ensureActiveProfile();
+
     const content = (commentInputs[postId] ?? "").trim();
     if (!content) {
       Alert.alert("评论失败", "请输入评论内容。");
@@ -882,7 +907,7 @@ export function SpaceWorkspaceScreen({
         assignModelId(item, createUlid());
         item.spaceId = currentSpace.id;
         item.content = content;
-        item.commenterId = currentUser.id;
+        item.commenterId = activeProfile.id;
         item.postId = postId;
         item.commentedAt = new Date(commentedAt);
         assignTimestamps(item, commentedAt, commentedAt);
@@ -909,56 +934,86 @@ export function SpaceWorkspaceScreen({
   };
 
   const onCreateSpace = async () => {
-    const createdSpace = createSpaceForCurrentUser();
-    setCreatedSpaceCode(createdSpace.code);
-    setCreatedCodeVisible(true);
-    await activateSpace(createdSpace.code);
+    const nextSpaceName = clampSpaceNameInput(createNameInput);
+    if (!nextSpaceName) {
+      Alert.alert("创建失败", "请输入空间名称。");
+      return;
+    }
+
+    try {
+      const profile = await ensureActiveProfile();
+      const nextSpaceId = createUlid();
+
+      await createSpaceLocally({
+        userId: profile.id,
+        spaceId: nextSpaceId,
+        name: nextSpaceName,
+      });
+
+      setCreateModalVisible(false);
+      setCreateNameInput("");
+      setCreatedSpaceCode(formatSharedSpaceToken(nextSpaceName, nextSpaceId));
+      setCreatedCodeVisible(true);
+      await activateSpace(nextSpaceId);
+    } catch (error) {
+      Alert.alert("创建失败", String(error));
+    }
   };
 
   const onJoinSpace = async () => {
-    const result = joinSpaceByCode(joinCodeInput);
-    if (!result.ok) {
-      Alert.alert("加入失败", result.message);
+    const parsedToken = parseSharedSpaceToken(joinTokenInput);
+    const nextSpaceId = parsedToken?.id ?? "";
+    const nextSpaceName = parsedToken?.name ?? "";
+    if (!nextSpaceId) {
+      Alert.alert("加入失败", "请输入好友分享给你的空间口令。");
       return;
     }
-    setJoinModalVisible(false);
-    setJoinCodeInput("");
-    await activateSpace(result.space.code);
+    if (!isUlid(nextSpaceId)) {
+      Alert.alert("加入失败", "分享口令里的 ID号 必须是 26 位 ULID。");
+      return;
+    }
+    if (!nextSpaceName) {
+      Alert.alert("加入失败", "请按“空间名_ID号”的格式输入分享口令。");
+      return;
+    }
+
+    try {
+      const profile = await ensureActiveProfile();
+      await createSpaceLocally({
+        userId: profile.id,
+        spaceId: nextSpaceId,
+        name: nextSpaceName,
+      });
+
+      setJoinModalVisible(false);
+      setJoinTokenInput("");
+      await activateSpace(nextSpaceId);
+    } catch (error) {
+      Alert.alert("加入失败", String(error));
+    }
   };
 
-  const onRenameSpace = async () => {
+  const onLeaveSpace = async () => {
     if (!currentSpace) {
       return;
     }
-    const result = renameSpaceByCode(currentSpace.code, renameInput);
-    if (!result.ok) {
-      Alert.alert("修改失败", result.message);
-      return;
-    }
-    setRenameModalVisible(false);
-    await refreshWorkspace(currentSpace.code);
-  };
-
-  const onLeaveSpace = () => {
-    if (!currentSpace) {
-      return;
-    }
+    const profile = await ensureActiveProfile();
     setMenuOpen(false);
-    const result = leaveSpaceByCode(currentSpace.code);
-    if (!result.ok) {
-      Alert.alert("退出失败", result.message);
+    const ok = await leaveSpaceLocally(currentSpace.id, profile.id);
+    if (!ok) {
+      Alert.alert("退出失败", "没有找到当前空间里的本地成员关系。");
       return;
     }
     setSidebarVisible(false);
     void refreshWorkspace();
   };
 
-  const onDisbandSpace = () => {
+  const onDisbandSpace = async () => {
     if (!currentSpace) {
       return;
     }
     setMenuOpen(false);
-    const ok = disbandSpaceByCode(currentSpace.code);
+    const ok = await disbandSpaceLocally(currentSpace.id);
     if (!ok) {
       Alert.alert("解散失败", "没有找到当前空间。");
       return;
@@ -997,7 +1052,7 @@ export function SpaceWorkspaceScreen({
     setSyncingSpace(true);
     try {
       await syncSpace(currentSpace.id);
-      await loadDbPosts(currentSpace.id);
+      await refreshWorkspace(currentSpace.id);
       Alert.alert("同步完成", "当前空间的本地数据已经完成一次同步。");
     } catch (error) {
       Alert.alert(
@@ -1009,20 +1064,23 @@ export function SpaceWorkspaceScreen({
     }
   };
 
-  const copySpaceCode = useCallback(async (spaceCode: string) => {
-    if (!spaceCode) {
+  const copySpaceCode = useCallback(async (shareToken: string) => {
+    if (!shareToken) {
       return;
     }
     const clipboard = getClipboardModule();
     if (!clipboard) {
-      Alert.alert("无法复制", "当前环境暂不支持复制，请手动记下这个 ID号。");
+      Alert.alert(
+        "无法复制",
+        "当前环境暂不支持复制，请手动记下这个分享口令：空间名_ID号。",
+      );
       return;
     }
     try {
-      await clipboard.setStringAsync(spaceCode);
+      await clipboard.setStringAsync(shareToken);
       Alert.alert(
         "已复制",
-        "空间 ID号 已复制，发给好友后对方粘贴 ID号 就能加入空间。",
+        "分享口令已复制。把“空间名_ID号”发给好友，对方粘贴后就能加入空间。",
       );
     } catch {
       Alert.alert("复制失败", "这次没有复制成功，请稍后再试。");
@@ -1041,7 +1099,7 @@ export function SpaceWorkspaceScreen({
     {
       key: "share",
       label: "分享空间",
-      description: "复制 ID号 发给好友加入空间",
+      description: "复制“空间名_ID号”发给好友",
       icon: "copy-outline" as const,
       onPress: openShareDialog,
     },
@@ -1119,25 +1177,6 @@ export function SpaceWorkspaceScreen({
           style={[
             styles.headerActionButtonCompact,
             styles.headerActionButtonCompactSecondary,
-            syncingSpace && styles.actionButtonDisabled,
-          ]}
-          onPress={() => void onSyncCurrentSpace()}
-          disabled={syncingSpace}
-        >
-          <Ionicons name="sync-outline" size={16} color={workspaceTheme.icon} />
-          <Text
-            style={[
-              styles.headerActionButtonCompactText,
-              styles.headerActionButtonCompactTextSecondary,
-            ]}
-          >
-            {syncingSpace ? "同步中" : "同步"}
-          </Text>
-        </Pressable>
-        <Pressable
-          style={[
-            styles.headerActionButtonCompact,
-            styles.headerActionButtonCompactSecondary,
           ]}
           onPress={() => setMenuOpen(true)}
         >
@@ -1205,7 +1244,7 @@ export function SpaceWorkspaceScreen({
     : "从这里开始你的空间";
   const emptyStateDescription = joinedSpaces.length
     ? "我们正在同步最近一次使用的空间内容。"
-    : "你还没有加入任何空间，可以先创建一个，或者通过 ID号 加入已有空间。";
+    : "你还没有加入任何空间，可以先创建一个，或者通过“空间名_ID号”加入已有空间。";
 
   const onFeedSectionLayout = useCallback(
     (event: { nativeEvent: { layout: { y: number } } }) => {
@@ -1286,16 +1325,6 @@ export function SpaceWorkspaceScreen({
                           >
                             {currentSpace.name}
                           </Text>
-                          <Pressable
-                            style={styles.renameInlineButton}
-                            onPress={openRenameModal}
-                          >
-                            <Ionicons
-                              name="pencil-outline"
-                              size={13}
-                              color={workspaceTheme.icon}
-                            />
-                          </Pressable>
                         </View>
                         <Text style={styles.spaceHeroSubtitle}>
                           共享空间 · {activeMembers.length}位成员
@@ -1353,7 +1382,7 @@ export function SpaceWorkspaceScreen({
                     <View style={styles.emptyActionRow}>
                       <Pressable
                         style={styles.emptyPrimaryButton}
-                        onPress={() => void onCreateSpace()}
+                        onPress={openCreateSpaceDialog}
                       >
                         <Text style={styles.emptyPrimaryButtonText}>
                           创建空间
@@ -1647,7 +1676,7 @@ export function SpaceWorkspaceScreen({
                         ]}
                         numberOfLines={1}
                       >
-                        {item.code}
+                        {formatSharedSpaceToken(item.name, item.code)}
                       </Text>
                       <Text
                         style={[
@@ -1666,7 +1695,7 @@ export function SpaceWorkspaceScreen({
             <View style={styles.sidebarBottomActions}>
               <Pressable
                 style={styles.sidebarCreateButton}
-                onPress={() => void onCreateSpace()}
+                onPress={openCreateSpaceDialog}
               >
                 <Ionicons
                   name="add"
@@ -1692,9 +1721,43 @@ export function SpaceWorkspaceScreen({
       </View>
 
       <CenterDialog
+        visible={createModalVisible}
+        title="创建空间"
+        description="这里会先在本地创建空间，空间名称固定下来；之后是否同步，由你手动决定。"
+        onClose={() => setCreateModalVisible(false)}
+        footer={
+          <View style={styles.dialogActionRow}>
+            <Pressable
+              style={styles.dialogGhostButton}
+              onPress={() => setCreateModalVisible(false)}
+            >
+              <Text style={styles.dialogGhostButtonText}>取消</Text>
+            </Pressable>
+            <Pressable
+              style={styles.dialogPrimaryButton}
+              onPress={() => void onCreateSpace()}
+            >
+              <Text style={styles.dialogPrimaryButtonText}>创建</Text>
+            </Pressable>
+          </View>
+        }
+      >
+        <TextInput
+          value={createNameInput}
+          onChangeText={(value) =>
+            setCreateNameInput(clampSpaceNameInput(value))
+          }
+          placeholder="输入空间名称（最多 10 字）"
+          placeholderTextColor={workspaceTheme.placeholder}
+          maxLength={10}
+          style={styles.dialogInput}
+        />
+      </CenterDialog>
+
+      <CenterDialog
         visible={shareCodeVisible}
         title="分享空间"
-        description="复制下面的 ID号 发给好友，让对方粘贴 ID号 加入当前空间。"
+        description="复制下面的分享口令发给好友，让对方粘贴“空间名_ID号”加入当前空间。"
         onClose={() => setShareCodeVisible(false)}
         footer={
           <View style={styles.dialogActionRow}>
@@ -1706,15 +1769,25 @@ export function SpaceWorkspaceScreen({
             </Pressable>
             <Pressable
               style={styles.dialogPrimaryButton}
-              onPress={() => void copySpaceCode(currentSpace?.code ?? "")}
+              onPress={() =>
+                void copySpaceCode(
+                  formatSharedSpaceToken(
+                    currentSpace?.name ?? "",
+                    currentSpace?.code ?? "",
+                  ),
+                )
+              }
             >
-              <Text style={styles.dialogPrimaryButtonText}>复制ID号</Text>
+              <Text style={styles.dialogPrimaryButtonText}>复制分享口令</Text>
             </Pressable>
           </View>
         }
       >
         <TextInput
-          value={currentSpace?.code ?? ""}
+          value={formatSharedSpaceToken(
+            currentSpace?.name ?? "",
+            currentSpace?.code ?? "",
+          )}
           editable={false}
           selectTextOnFocus
           style={[styles.dialogInput, styles.dialogReadonlyInput]}
@@ -1724,13 +1797,19 @@ export function SpaceWorkspaceScreen({
       <CenterDialog
         visible={joinModalVisible}
         title="加入空间"
-        description="输入朋友分享给你的空间 ID号。"
-        onClose={() => setJoinModalVisible(false)}
+        description="输入朋友分享给你的口令，先在本地加入这个空间；等你点同步时，再和服务器端空间整合。"
+        onClose={() => {
+          setJoinModalVisible(false);
+          setJoinTokenInput("");
+        }}
         footer={
           <View style={styles.dialogActionRow}>
             <Pressable
               style={styles.dialogGhostButton}
-              onPress={() => setJoinModalVisible(false)}
+              onPress={() => {
+                setJoinModalVisible(false);
+                setJoinTokenInput("");
+              }}
             >
               <Text style={styles.dialogGhostButtonText}>取消</Text>
             </Pressable>
@@ -1744,52 +1823,23 @@ export function SpaceWorkspaceScreen({
         }
       >
         <TextInput
-          value={joinCodeInput}
-          onChangeText={(value) => setJoinCodeInput(value.toUpperCase())}
+          value={joinTokenInput}
+          onChangeText={setJoinTokenInput}
           autoCapitalize="characters"
-          placeholder="输入 26 位 ID号"
+          placeholder="输入分享口令：空间名_ID号"
           placeholderTextColor={workspaceTheme.placeholder}
-          maxLength={26}
+          maxLength={64}
           style={styles.dialogInput}
         />
-      </CenterDialog>
-
-      <CenterDialog
-        visible={renameModalVisible}
-        title="修改空间名称"
-        description="最多支持 10 个字，方便你更清楚地区分不同空间。"
-        onClose={() => setRenameModalVisible(false)}
-        footer={
-          <View style={styles.dialogActionRow}>
-            <Pressable
-              style={styles.dialogGhostButton}
-              onPress={() => setRenameModalVisible(false)}
-            >
-              <Text style={styles.dialogGhostButtonText}>取消</Text>
-            </Pressable>
-            <Pressable
-              style={styles.dialogPrimaryButton}
-              onPress={() => void onRenameSpace()}
-            >
-              <Text style={styles.dialogPrimaryButtonText}>保存</Text>
-            </Pressable>
-          </View>
-        }
-      >
-        <TextInput
-          value={renameInput}
-          onChangeText={(value) => setRenameInput(clampSpaceNameInput(value))}
-          placeholder="输入新的空间名称（最多 10 字）"
-          placeholderTextColor={workspaceTheme.placeholder}
-          maxLength={10}
-          style={styles.dialogInput}
-        />
+        <Text style={styles.dialogHelperText}>
+          分享时请原样发送，好友直接粘贴这串口令即可加入。
+        </Text>
       </CenterDialog>
 
       <CenterDialog
         visible={createdCodeVisible}
         title="新空间已创建"
-        description="你已经进入新空间，复制下面的 ID号 发给好友，让对方粘贴 ID号 加入空间。"
+        description="你已经进入新空间，复制下面的分享口令发给好友，让对方粘贴“空间名_ID号”加入空间。"
         onClose={() => setCreatedCodeVisible(false)}
         footer={
           <View style={styles.dialogActionRow}>
@@ -1797,7 +1847,7 @@ export function SpaceWorkspaceScreen({
               style={styles.dialogGhostButton}
               onPress={() => void copySpaceCode(createdSpaceCode)}
             >
-              <Text style={styles.dialogGhostButtonText}>复制ID号</Text>
+              <Text style={styles.dialogGhostButtonText}>复制分享口令</Text>
             </Pressable>
             <Pressable
               style={styles.dialogPrimaryButton}
@@ -1953,7 +2003,7 @@ export function SpaceWorkspaceScreen({
                               setPreviewImage({
                                 id: `draft-${index}`,
                                 postId: "draft",
-                                uploaderId: currentUser.id,
+                                uploaderId: currentUserId,
                                 uri,
                               })
                             }

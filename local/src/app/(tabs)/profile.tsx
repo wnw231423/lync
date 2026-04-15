@@ -1,10 +1,10 @@
-// 个人资料页：负责昵称、头像的本地持久化，以及头像导出到系统相册。
+// 个人资料页：当前版本只允许修改昵称。
+// 头像统一改成“蓝底 + 昵称首字”的文字徽标，不再支持上传或下载头像。
 import { Ionicons } from "@expo/vector-icons";
 import { router, useFocusEffect } from "expo-router";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   Alert,
-  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -15,24 +15,12 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { getCurrentUser } from "@/features/travel/mockApp";
 import {
   ensureCurrentUserProfileInDb,
   getCurrentUserProfileFromDb,
-  updateCurrentUserAvatarInDb,
   updateCurrentUserNicknameInDb,
   type UserProfileData,
 } from "@/features/travel/userDb";
-import { saveImageToAlbum } from "@/lib/imageStorage";
-
-type ImagePickerModule = {
-  launchImageLibraryAsync: (options: Record<string, unknown>) => Promise<{
-    canceled: boolean;
-    assets?: { uri: string }[];
-  }>;
-};
-
-let imagePickerModuleCache: ImagePickerModule | null | undefined;
 
 const profilePalette = {
   background: "#F4FBF6",
@@ -45,75 +33,33 @@ const profilePalette = {
   muted: "#6F7897",
   softText: "#9AA4C0",
   primary: "#60C28E",
-  secondary: "#3E9E6C",
-  success: "#34D399",
+  avatarBlue: "#2563EB",
   shadowDark: "#D3E4DA",
-  shadowLight: "#FFFFFF",
 };
 
-// profilePalette 统一维护个人资料页的视觉配色和层级。
-// 懒加载选图模块，避免测试环境里缺少原生能力时报错。
-function getImagePickerModule() {
-  if (imagePickerModuleCache !== undefined) {
-    return imagePickerModuleCache;
-  }
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    imagePickerModuleCache = require("expo-image-picker") as ImagePickerModule;
-  } catch {
-    imagePickerModuleCache = null;
-  }
-  return imagePickerModuleCache;
+function getAvatarText(name: string) {
+  return Array.from(name.trim())[0] || "空";
 }
 
-// 头像优先显示图片，失败时退回到昵称最后一个字。
-function Avatar({ uri, name }: { uri: string; name: string }) {
-  const [loadFailed, setLoadFailed] = useState(false);
-  useEffect(() => {
-    setLoadFailed(false);
-  }, [uri]);
-  const fallbackText = name.trim().slice(-1) || "旅";
-
-  if (loadFailed || !uri) {
-    return (
-      <View style={styles.avatarFallback}>
-        <Text style={styles.avatarFallbackText}>{fallbackText}</Text>
-      </View>
-    );
-  }
-
+function Avatar({ name }: { name: string }) {
   return (
-    <Image
-      source={{ uri }}
-      style={styles.avatar}
-      onError={() => setLoadFailed(true)}
-    />
+    <View style={styles.avatarFallback}>
+      <Text style={styles.avatarFallbackText}>{getAvatarText(name)}</Text>
+    </View>
   );
 }
 
-// ProfilePage 负责读取本地资料，并承接昵称、头像相关的编辑动作。
 export default function ProfilePage() {
-  // current 是 mock 层里的当前用户，用来做本地资料缺失时的兜底展示。
-  const current = useMemo(() => getCurrentUser(), []);
-  // profile 是 WatermelonDB 里规范化后的用户资料。
   const [profile, setProfile] = useState<UserProfileData | null>(null);
-  // nicknameInput 保存昵称输入框的草稿内容。
   const [nicknameInput, setNicknameInput] = useState("");
-  // savingProfile 避免重复提交昵称或头像修改。
   const [savingProfile, setSavingProfile] = useState(false);
-  // savingAvatarToAlbum 表示“保存头像到相册”动作是否还在进行中。
-  const [savingAvatarToAlbum, setSavingAvatarToAlbum] = useState(false);
 
-  const avatarUri = profile?.avatarLocalUri || profile?.avatarRemoteUrl || "";
-  const avatarDisplayUri =
-    profile?.avatarDisplayUri ||
-    profile?.avatarLocalUri ||
-    profile?.avatarRemoteUrl ||
-    "";
-  const displayName = profile?.nickname || current.username;
-  const userId = profile?.id || current.id;
+  const displayName = useMemo(
+    () => profile?.nickname || "空间用户",
+    [profile?.nickname],
+  );
+  const userId = profile?.id || "";
 
-  // 读取并刷新当前用户在本地数据库中的资料。
   const loadProfile = useCallback(async () => {
     await ensureCurrentUserProfileInDb();
     const row = await getCurrentUserProfileFromDb();
@@ -127,7 +73,6 @@ export default function ProfilePage() {
     }, [loadProfile]),
   );
 
-  // 保存昵称，并同步更新到空间里依赖昵称展示的地方。
   const onSaveNickname = async () => {
     const clean = nicknameInput.trim();
     if (!clean) {
@@ -148,58 +93,6 @@ export default function ProfilePage() {
     }
   };
 
-  // 从系统相册选择一张图片，并更新当前用户头像。
-  const onPickAvatar = async () => {
-    const imagePicker = getImagePickerModule();
-    if (!imagePicker) {
-      Alert.alert(
-        "相册不可用",
-        "当前构建未包含图片选择模块，请重新构建开发客户端。",
-      );
-      return;
-    }
-
-    try {
-      const result = await imagePicker.launchImageLibraryAsync({
-        mediaTypes: ["images"],
-        allowsEditing: false,
-        quality: 1,
-        allowsMultipleSelection: false,
-        selectionLimit: 1,
-      });
-      if (result.canceled || !result.assets || result.assets.length === 0) {
-        return;
-      }
-
-      setSavingProfile(true);
-      const next = await updateCurrentUserAvatarInDb(result.assets[0].uri);
-      setProfile(next);
-      Alert.alert("已保存", "头像已经更新。");
-    } catch (error) {
-      Alert.alert("头像更新失败", String(error));
-    } finally {
-      setSavingProfile(false);
-    }
-  };
-
-  // 把当前头像保存到系统相册。
-  const onSaveAvatarToAlbum = async () => {
-    if (!avatarUri) {
-      return;
-    }
-
-    setSavingAvatarToAlbum(true);
-    try {
-      await saveImageToAlbum(avatarUri, "travel-avatar-export");
-      Alert.alert("已保存", "头像已经保存到系统相册。");
-    } catch (error) {
-      Alert.alert("保存失败", String(error));
-    } finally {
-      setSavingAvatarToAlbum(false);
-    }
-  };
-
-  // 优先返回上一页；没有返回栈时回到首页。
   const goBack = () => {
     if (router.canGoBack()) {
       router.back();
@@ -236,37 +129,18 @@ export default function ProfilePage() {
 
           <View style={styles.profileCard}>
             <View style={styles.profileMainRow}>
-              <Avatar uri={avatarDisplayUri} name={displayName} />
+              <Avatar name={displayName} />
 
               <View style={styles.profileTextWrap}>
                 <Text style={styles.displayName}>{displayName}</Text>
                 <Text style={styles.userIdText}>ID号 · {userId}</Text>
               </View>
+            </View>
 
-              <View style={styles.profileActionColumn}>
-                <Pressable
-                  style={styles.iconButton}
-                  onPress={() => void onPickAvatar()}
-                  disabled={savingProfile || savingAvatarToAlbum}
-                >
-                  <Ionicons
-                    name="camera-outline"
-                    size={18}
-                    color={profilePalette.primary}
-                  />
-                </Pressable>
-                <Pressable
-                  style={styles.iconButton}
-                  onPress={() => void onSaveAvatarToAlbum()}
-                  disabled={!avatarUri || savingProfile || savingAvatarToAlbum}
-                >
-                  <Ionicons
-                    name="download-outline"
-                    size={18}
-                    color={profilePalette.primary}
-                  />
-                </Pressable>
-              </View>
+            <View style={styles.noteCard}>
+              <Text style={styles.noteText}>
+                头像会根据昵称自动生成，不再单独上传头像。
+              </Text>
             </View>
 
             <View style={styles.editorBlock}>
@@ -282,53 +156,16 @@ export default function ProfilePage() {
               <Pressable
                 style={[
                   styles.saveButton,
-                  (savingProfile || savingAvatarToAlbum) &&
-                    styles.disabledButton,
+                  savingProfile && styles.disabledButton,
                 ]}
                 onPress={() => void onSaveNickname()}
-                disabled={savingProfile || savingAvatarToAlbum}
+                disabled={savingProfile}
               >
                 <Text style={styles.saveButtonText}>
                   {savingProfile ? "保存中..." : "保存资料"}
                 </Text>
               </Pressable>
             </View>
-          </View>
-
-          <View style={styles.actionCard}>
-            <Pressable
-              style={styles.actionRow}
-              onPress={() => void onPickAvatar()}
-              disabled={savingProfile || savingAvatarToAlbum}
-            >
-              <View style={styles.actionIconWrap}>
-                <Ionicons
-                  name="image-outline"
-                  size={18}
-                  color={profilePalette.primary}
-                />
-              </View>
-              <Text style={styles.actionText}>
-                {savingProfile ? "处理中..." : "重新选择头像"}
-              </Text>
-            </Pressable>
-
-            <Pressable
-              style={styles.actionRow}
-              onPress={() => void onSaveAvatarToAlbum()}
-              disabled={!avatarUri || savingProfile || savingAvatarToAlbum}
-            >
-              <View style={styles.actionIconWrap}>
-                <Ionicons
-                  name="download-outline"
-                  size={18}
-                  color={profilePalette.primary}
-                />
-              </View>
-              <Text style={styles.actionText}>
-                {savingAvatarToAlbum ? "保存中..." : "保存头像到相册"}
-              </Text>
-            </Pressable>
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -382,10 +219,6 @@ const styles = StyleSheet.create({
     backgroundColor: profilePalette.surface,
     borderWidth: 1,
     borderColor: profilePalette.border,
-    shadowColor: profilePalette.shadowLight,
-    shadowOpacity: 0.95,
-    shadowRadius: 8,
-    shadowOffset: { width: -3, height: -3 },
     elevation: 2,
   },
   pageTitle: {
@@ -415,17 +248,11 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 14,
   },
-  avatar: {
-    width: 84,
-    height: 84,
-    borderRadius: 42,
-    backgroundColor: profilePalette.surfaceRaised,
-  },
   avatarFallback: {
     width: 84,
     height: 84,
     borderRadius: 42,
-    backgroundColor: profilePalette.primary,
+    backgroundColor: profilePalette.avatarBlue,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -449,23 +276,19 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "600",
   },
-  profileActionColumn: {
-    gap: 10,
-  },
-  iconButton: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    alignItems: "center",
-    justifyContent: "center",
+  noteCard: {
+    marginTop: 18,
+    borderRadius: 18,
     backgroundColor: profilePalette.surfaceRaised,
     borderWidth: 1,
     borderColor: profilePalette.border,
-    shadowColor: profilePalette.shadowDark,
-    shadowOpacity: 0.14,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 3,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  noteText: {
+    color: profilePalette.muted,
+    fontSize: 13,
+    lineHeight: 20,
   },
   editorBlock: {
     marginTop: 18,
@@ -487,54 +310,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     paddingVertical: 14,
-    shadowColor: profilePalette.primary,
-    shadowOpacity: 0.22,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 10 },
     elevation: 4,
   },
   saveButtonText: {
     color: "#FFFFFF",
     fontSize: 15,
     fontWeight: "800",
-  },
-  actionCard: {
-    borderRadius: 28,
-    backgroundColor: profilePalette.surface,
-    borderWidth: 1,
-    borderColor: profilePalette.border,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    gap: 12,
-    shadowColor: profilePalette.shadowDark,
-    shadowOpacity: 0.14,
-    shadowRadius: 20,
-    shadowOffset: { width: 0, height: 10 },
-    elevation: 4,
-  },
-  actionRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    borderRadius: 18,
-    backgroundColor: profilePalette.surfaceRaised,
-    borderWidth: 1,
-    borderColor: profilePalette.border,
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-  },
-  actionIconWrap: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: profilePalette.surface,
-  },
-  actionText: {
-    color: profilePalette.text,
-    fontSize: 14,
-    fontWeight: "700",
   },
   disabledButton: {
     opacity: 0.6,

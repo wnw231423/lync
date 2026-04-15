@@ -13,8 +13,11 @@ import {
 import { SoftIconBadge } from "@/components/SoftIconBadge";
 import { database } from "@/model";
 import Expense from "@/model/Expense";
-import { ensureMockSpaceSeeded } from "@/features/travel/dbSync";
-import { getSpaceByCode, type SpaceData } from "@/features/travel/mockApp";
+import {
+  getSpaceSnapshotFromDb,
+  type SpaceData,
+} from "@/features/travel/spaceDb";
+import { ensureCurrentUserProfileInDb } from "@/features/travel/userDb";
 
 // LedgerExpense 是结算算法真正需要的最小账单信息。
 type LedgerExpense = {
@@ -115,9 +118,7 @@ export default function SettlementPage() {
   const spaceCode = typeof code === "string" ? code : "";
 
   // space 保存当前空间快照，用来拿成员关系和用户昵称。
-  const [space, setSpace] = useState<SpaceData | null>(() =>
-    spaceCode ? getSpaceByCode(spaceCode) : null,
-  );
+  const [space, setSpace] = useState<SpaceData | null>(null);
   // dbExpenses 是从本地数据库读取出的结算输入数据。
   const [dbExpenses, setDbExpenses] = useState<LedgerExpense[]>([]);
 
@@ -144,16 +145,16 @@ export default function SettlementPage() {
         return;
       }
 
-      const nextSpace = getSpaceByCode(spaceCode);
-      setSpace(nextSpace);
-      if (nextSpace) {
-        void (async () => {
-          await ensureMockSpaceSeeded(nextSpace);
+      void (async () => {
+        await ensureCurrentUserProfileInDb();
+        const nextSpace = await getSpaceSnapshotFromDb(spaceCode);
+        setSpace(nextSpace);
+        if (nextSpace) {
           await loadDbExpenses(nextSpace.id);
-        })();
-      } else {
-        setDbExpenses([]);
-      }
+        } else {
+          setDbExpenses([]);
+        }
+      })();
     }, [spaceCode, loadDbExpenses]),
   );
 

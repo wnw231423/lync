@@ -291,7 +291,7 @@ export const styles = StyleSheet.create({
     marginTop: 18,
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
+    gap: 10,
     width: "100%",
   },
   heroPrimaryAction: {
@@ -318,16 +318,16 @@ export const styles = StyleSheet.create({
   },
   heroSecondaryAction: {
     minHeight: 60,
-    minWidth: 120,
+    minWidth: 98,
     borderRadius: 18,
     backgroundColor: palette.surface,
     borderWidth: 1,
     borderColor: palette.border,
-    paddingHorizontal: 18,
+    paddingHorizontal: 14,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    gap: 8,
+    gap: 6,
     shadowColor: palette.shadow,
     shadowOpacity: 0.06,
     shadowRadius: 14,
@@ -336,13 +336,13 @@ export const styles = StyleSheet.create({
   },
   heroSecondaryActionText: {
     color: palette.textPrimary,
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: "700",
   },
   headerActionRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: 6,
     padding: 0,
     borderRadius: 999,
     backgroundColor: "transparent",
@@ -389,13 +389,13 @@ export const styles = StyleSheet.create({
     backgroundColor: palette.accent,
     borderWidth: 1,
     borderColor: palette.accent,
-    minWidth: 84,
+    minWidth: 78,
   },
   headerActionButtonCompactSecondary: {
     backgroundColor: palette.surface,
     borderWidth: 1,
     borderColor: palette.border,
-    minWidth: 78,
+    minWidth: 68,
   },
   headerActionButtonCompactText: {
     fontSize: 13,
@@ -406,6 +406,9 @@ export const styles = StyleSheet.create({
   },
   headerActionButtonCompactTextSecondary: {
     color: palette.textPrimary,
+  },
+  actionButtonDisabled: {
+    opacity: 0.62,
   },
   headerMenuWrap: {
     position: "relative",

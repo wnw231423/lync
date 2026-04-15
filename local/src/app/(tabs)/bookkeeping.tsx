@@ -17,7 +17,7 @@ import { database } from "@/model";
 import Expense from "@/model/Expense";
 import { createUlid } from "@/lib/ids";
 import { assignModelId, dateToTimestamp } from "@/lib/watermelon";
-import { syncMockSpaceToDatabase } from "@/features/travel/dbSync";
+import { ensureMockSpaceSeeded } from "@/features/travel/dbSync";
 import {
   getCurrentUser,
   getSpaceByCode,
@@ -113,7 +113,7 @@ export default function BookkeepingPage() {
       setSpace(nextSpace);
       if (nextSpace) {
         void (async () => {
-          await syncMockSpaceToDatabase(nextSpace);
+          await ensureMockSpaceSeeded(nextSpace);
           await loadDbExpenses(nextSpace.id);
         })();
       } else {

@@ -49,7 +49,7 @@ import {
   assignTimestamps,
   dateToTimestamp,
 } from "@/lib/watermelon";
-import { syncMockSpaceToDatabase } from "@/features/travel/dbSync";
+import { ensureMockSpaceSeeded } from "@/features/travel/dbSync";
 import {
   createSpaceForCurrentUser,
   disbandSpaceByCode,
@@ -68,6 +68,7 @@ import {
   type UserProfileData,
 } from "@/features/travel/userDb";
 import { styles, workspaceTheme } from "@/features/travel/spaceWorkspaceStyles";
+import { syncSpace } from "@/sync/sync";
 
 // ImagePickerModule / ClipboardModule 用懒加载方式描述原生模块接口，
 // 这样在 Jest 或缺少原生依赖的环境里也不会因为静态 import 直接报错。
@@ -322,6 +323,7 @@ export function SpaceWorkspaceScreen({
   const [composerVisible, setComposerVisible] = useState(false);
   const [editingPostId, setEditingPostId] = useState<string | null>(null);
   const [publishingPost, setPublishingPost] = useState(false);
+  const [syncingSpace, setSyncingSpace] = useState(false);
   const [updatingPostId, setUpdatingPostId] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<FeedPostImage | null>(null);
   const [savingPreview, setSavingPreview] = useState(false);
@@ -459,7 +461,7 @@ export function SpaceWorkspaceScreen({
     );
   }, []);
 
-  // loadSpaceSnapshot 负责切换空间时同步 mock、数据库和最近使用空间记忆。
+  // loadSpaceSnapshot 负责切换空间时准备本地展示数据，并刷新最近使用空间记忆。
   const loadSpaceSnapshot = useCallback(
     async (spaceCode: string) => {
       const nextSpace = spaceCode ? getSpaceByCode(spaceCode) : null;
@@ -469,7 +471,7 @@ export function SpaceWorkspaceScreen({
         await clearLastSpaceCode();
         return;
       }
-      await syncMockSpaceToDatabase(nextSpace);
+      await ensureMockSpaceSeeded(nextSpace);
       await loadDbPosts(nextSpace.id);
       await saveLastSpaceCode(nextSpace.code);
     },
@@ -987,6 +989,26 @@ export function SpaceWorkspaceScreen({
     });
   };
 
+  const onSyncCurrentSpace = async () => {
+    if (!currentSpace || syncingSpace) {
+      return;
+    }
+
+    setSyncingSpace(true);
+    try {
+      await syncSpace(currentSpace.id);
+      await loadDbPosts(currentSpace.id);
+      Alert.alert("同步完成", "当前空间的本地数据已经完成一次同步。");
+    } catch (error) {
+      Alert.alert(
+        "同步失败",
+        `${String(error)}\n\n请确认本地服务端已经启动，并且 EXPO_PUBLIC_API_URL 配置正确。`,
+      );
+    } finally {
+      setSyncingSpace(false);
+    }
+  };
+
   const copySpaceCode = useCallback(async (spaceCode: string) => {
     if (!spaceCode) {
       return;
@@ -1097,6 +1119,25 @@ export function SpaceWorkspaceScreen({
           style={[
             styles.headerActionButtonCompact,
             styles.headerActionButtonCompactSecondary,
+            syncingSpace && styles.actionButtonDisabled,
+          ]}
+          onPress={() => void onSyncCurrentSpace()}
+          disabled={syncingSpace}
+        >
+          <Ionicons name="sync-outline" size={16} color={workspaceTheme.icon} />
+          <Text
+            style={[
+              styles.headerActionButtonCompactText,
+              styles.headerActionButtonCompactTextSecondary,
+            ]}
+          >
+            {syncingSpace ? "同步中" : "同步"}
+          </Text>
+        </Pressable>
+        <Pressable
+          style={[
+            styles.headerActionButtonCompact,
+            styles.headerActionButtonCompactSecondary,
           ]}
           onPress={() => setMenuOpen(true)}
         >
@@ -1120,6 +1161,19 @@ export function SpaceWorkspaceScreen({
         <Pressable style={styles.heroPrimaryAction} onPress={openComposer}>
           <Ionicons name="add" size={18} color={workspaceTheme.iconOnAccent} />
           <Text style={styles.heroPrimaryActionText}>发布动态</Text>
+        </Pressable>
+        <Pressable
+          style={[
+            styles.heroSecondaryAction,
+            syncingSpace && styles.actionButtonDisabled,
+          ]}
+          onPress={() => void onSyncCurrentSpace()}
+          disabled={syncingSpace}
+        >
+          <Ionicons name="sync-outline" size={18} color={workspaceTheme.icon} />
+          <Text style={styles.heroSecondaryActionText}>
+            {syncingSpace ? "同步中" : "同步信息"}
+          </Text>
         </Pressable>
         <Pressable
           style={styles.heroSecondaryAction}

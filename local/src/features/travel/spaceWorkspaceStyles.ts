@@ -18,6 +18,7 @@ const palette = {
   accentSoftBorder: "#C7E7D3",
   success: "#34D399",
   pink: "#A8E1C0",
+  avatarBlue: "#2563EB",
   danger: "#EF4444",
   shadow: "#163127",
 };
@@ -313,7 +314,7 @@ export const styles = StyleSheet.create({
   },
   heroPrimaryActionText: {
     color: "#FFFFFF",
-    fontSize: 17,
+    fontSize: 14,
     fontWeight: "800",
   },
   heroSecondaryAction: {
@@ -1011,7 +1012,7 @@ export const styles = StyleSheet.create({
     fontWeight: "700",
   },
   avatarFallback: {
-    backgroundColor: palette.accent,
+    backgroundColor: palette.avatarBlue,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -1042,6 +1043,12 @@ export const styles = StyleSheet.create({
     shadowRadius: 24,
     shadowOffset: { width: 0, height: 16 },
     elevation: 10,
+  },
+  dialogHelperText: {
+    marginTop: 10,
+    color: palette.textSecondary,
+    fontSize: 12,
+    lineHeight: 18,
   },
   dialogHeader: {
     flexDirection: "row",

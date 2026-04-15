@@ -1,4 +1,5 @@
 // 空间记账页：负责新增账单、查看历史账单，并跳转到结算页。
+import { Ionicons } from "@expo/vector-icons";
 import { Q } from "@nozbe/watermelondb";
 import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useCallback, useMemo, useState } from "react";
@@ -17,12 +18,15 @@ import { database } from "@/model";
 import Expense from "@/model/Expense";
 import { createUlid } from "@/lib/ids";
 import { assignModelId, dateToTimestamp } from "@/lib/watermelon";
-import { ensureMockSpaceSeeded } from "@/features/travel/dbSync";
 import {
-  getCurrentUser,
-  getSpaceByCode,
+  deleteExpenseLocally,
+  getSpaceSnapshotFromDb,
   type SpaceData,
-} from "@/features/travel/mockApp";
+} from "@/features/travel/spaceDb";
+import {
+  ensureCurrentUserProfileInDb,
+  type UserProfileData,
+} from "@/features/travel/userDb";
 
 // LedgerExpense 是账单页渲染用的轻量视图模型，金额已经提前换算成“元”。
 type LedgerExpense = {
@@ -71,10 +75,11 @@ export default function BookkeepingPage() {
   const { code } = useLocalSearchParams<{ code?: string }>();
   const spaceCode = typeof code === "string" ? code : "";
 
-  const currentUser = getCurrentUser();
-  // space 保存当前激活的空间快照，来源于 mock 领域层。
-  const [space, setSpace] = useState<SpaceData | null>(() =>
-    spaceCode ? getSpaceByCode(spaceCode) : null,
+  // space 保存当前激活的空间快照，来源于本地数据库。
+  const [space, setSpace] = useState<SpaceData | null>(null);
+  // currentProfile 用来拿到“当前这台设备用户”的稳定 id。
+  const [currentProfile, setCurrentProfile] = useState<UserProfileData | null>(
+    null,
   );
   // dbExpenses 保存从本地数据库读取并整理后的账单列表。
   const [dbExpenses, setDbExpenses] = useState<LedgerExpense[]>([]);
@@ -109,16 +114,17 @@ export default function BookkeepingPage() {
         return;
       }
 
-      const nextSpace = getSpaceByCode(spaceCode);
-      setSpace(nextSpace);
-      if (nextSpace) {
-        void (async () => {
-          await ensureMockSpaceSeeded(nextSpace);
+      void (async () => {
+        const profile = await ensureCurrentUserProfileInDb();
+        setCurrentProfile(profile);
+        const nextSpace = await getSpaceSnapshotFromDb(spaceCode);
+        setSpace(nextSpace);
+        if (nextSpace) {
           await loadDbExpenses(nextSpace.id);
-        })();
-      } else {
-        setDbExpenses([]);
-      }
+        } else {
+          setDbExpenses([]);
+        }
+      })();
     }, [spaceCode, loadDbExpenses]),
   );
 
@@ -149,7 +155,7 @@ export default function BookkeepingPage() {
 
   // onAddBill 负责校验表单，并以“分”为单位保存新账单。
   const onAddBill = async () => {
-    if (!space) {
+    if (!space || !currentProfile) {
       return;
     }
 
@@ -171,7 +177,7 @@ export default function BookkeepingPage() {
       await collection.create((expense) => {
         assignModelId(expense, createUlid());
         expense.spaceId = space.id;
-        expense.payerId = currentUser.id;
+        expense.payerId = currentProfile.id;
         expense.amount = amountInCent;
         expense.description = cleanTitle;
       });
@@ -188,6 +194,35 @@ export default function BookkeepingPage() {
       return;
     }
     router.push({ pathname: "/settlement", params: { code: spaceCode } });
+  };
+
+  // onDeleteBill 只删除当前本地库里的账单，后续是否同步交给用户手动触发。
+  const onDeleteBill = (expenseId: string) => {
+    if (!space) {
+      return;
+    }
+
+    Alert.alert(
+      "删除账单",
+      "这笔账单会先从本地删除，之后由你手动决定是否同步。",
+      [
+        { text: "取消", style: "cancel" },
+        {
+          text: "删除",
+          style: "destructive",
+          onPress: () => {
+            void (async () => {
+              const ok = await deleteExpenseLocally(expenseId);
+              if (!ok) {
+                Alert.alert("删除失败", "没有找到这笔本地账单。");
+                return;
+              }
+              await loadDbExpenses(space.id);
+            })();
+          },
+        },
+      ],
+    );
   };
 
   if (!space) {
@@ -298,10 +333,23 @@ export default function BookkeepingPage() {
             allExpenses.map((item) => (
               <View key={item.id} style={styles.listItem}>
                 <View style={styles.listItemTop}>
-                  <Text style={styles.listTitle}>{item.description}</Text>
-                  <Text style={styles.listAmount}>
-                    {formatAmount(item.amountYuan)}
-                  </Text>
+                  <View style={styles.listTitleWrap}>
+                    <Text style={styles.listTitle}>{item.description}</Text>
+                    <Text style={styles.listAmount}>
+                      {formatAmount(item.amountYuan)}
+                    </Text>
+                  </View>
+                  <Pressable
+                    style={styles.deleteBillButton}
+                    onPress={() => onDeleteBill(item.id)}
+                  >
+                    <Ionicons
+                      name="trash-outline"
+                      size={16}
+                      color={ledgerPalette.muted}
+                    />
+                    <Text style={styles.deleteBillButtonText}>删除</Text>
+                  </Pressable>
                 </View>
                 <Text style={styles.listMeta}>
                   付款人：{userNameById.get(item.payerId) || "未知成员"}
@@ -553,8 +601,11 @@ const styles = StyleSheet.create({
     gap: 12,
     alignItems: "flex-start",
   },
-  listTitle: {
+  listTitleWrap: {
     flex: 1,
+    gap: 6,
+  },
+  listTitle: {
     color: ledgerPalette.text,
     fontSize: 15,
     fontWeight: "700",
@@ -573,6 +624,22 @@ const styles = StyleSheet.create({
     marginTop: 4,
     color: ledgerPalette.softText,
     fontSize: 12,
+  },
+  deleteBillButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderWidth: 1,
+    borderColor: ledgerPalette.border,
+    backgroundColor: "rgba(255,255,255,0.78)",
+  },
+  deleteBillButtonText: {
+    color: ledgerPalette.muted,
+    fontSize: 12,
+    fontWeight: "700",
   },
   emptyContainer: {
     flex: 1,

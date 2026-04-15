@@ -2,6 +2,8 @@ import { synchronize } from "@nozbe/watermelondb/sync";
 
 import { database } from "@/model";
 import { META_TABLES, SYNC_TABLES, type SyncTableName } from "@/model/tables";
+import { ensureCurrentUserProfileInDb } from "@/features/travel/userDb";
+import { buildHttpErrorMessage, getApiBaseUrl } from "@/sync/api";
 import type { SyncChanges, SyncRecord, SyncTableChanges } from "@/sync/types";
 
 // WatermelonDB sync is not re-entrant for our use case. We keep the active
@@ -13,8 +15,8 @@ let activeSyncTask: Promise<void> | null = null;
  *
  * Even though pull is scoped by `spaceId`, push still sends WatermelonDB's
  * global local changes. This mirrors the current backend contract:
- * - Pull: `GET /sync?space_id=...`
- * - Push: global changes, with the server enforcing table constraints
+ * - Pull: `GET /sync` with `X-User-Id` / `X-Space-Id` headers
+ * - Push: global changes in `{ last_pulled_at, changes }`
  *
  * We also serialize sync calls here so the local database cannot be mutated by
  * multiple concurrent synchronize() executions.
@@ -49,21 +51,27 @@ export async function syncSpace(spaceId: string): Promise<void> {
  */
 async function runSync(spaceId: string): Promise<void> {
   const apiBaseUrl = getApiBaseUrl();
+  const currentUser = await ensureCurrentUserProfileInDb();
+  const commonHeaders = {
+    "X-User-Id": currentUser.id,
+    "X-Space-Id": spaceId,
+  };
 
   await synchronize({
     database,
     // Pull is where "space isolation" really happens in the current design.
     pullChanges: async ({ lastPulledAt, schemaVersion, migration }) => {
       const params = new URLSearchParams({
-        space_id: spaceId,
         last_pulled_at: String(lastPulledAt ?? 0),
         schema_version: String(schemaVersion),
         migration: JSON.stringify(migration ?? null),
       });
 
-      const response = await fetch(`${apiBaseUrl}/api/v1/sync?${params}`);
+      const response = await fetch(`${apiBaseUrl}/api/v1/sync?${params}`, {
+        headers: commonHeaders,
+      });
       if (!response.ok) {
-        throw new Error(await buildSyncErrorMessage("pull", response));
+        throw new Error(await buildHttpErrorMessage("Sync pull", response));
       }
 
       // During integration the backend may omit empty tables, so we normalize
@@ -92,38 +100,24 @@ async function runSync(spaceId: string): Promise<void> {
         changes as Partial<Record<SyncTableName, Partial<SyncTableChanges>>>,
       );
 
-      const response = await fetch(
-        `${apiBaseUrl}/api/v1/sync?last_pulled_at=${String(lastPulledAt ?? 0)}`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(sanitizedChanges),
+      const response = await fetch(`${apiBaseUrl}/api/v1/sync`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...commonHeaders,
         },
-      );
+        body: JSON.stringify({
+          last_pulled_at: lastPulledAt ?? 0,
+          changes: sanitizedChanges,
+        }),
+      });
 
       if (!response.ok) {
-        throw new Error(await buildSyncErrorMessage("push", response));
+        throw new Error(await buildHttpErrorMessage("Sync push", response));
       }
     },
     migrationsEnabledAtVersion: 1,
   });
-}
-
-/**
- * Reads and normalizes the backend base URL from Expo env vars.
- *
- * The trailing slash is removed so route concatenation stays stable regardless
- * of whether `.env` uses `http://host` or `http://host/`.
- */
-function getApiBaseUrl(): string {
-  const apiUrl = process.env.EXPO_PUBLIC_API_URL?.trim();
-  if (!apiUrl) {
-    throw new Error("EXPO_PUBLIC_API_URL is not configured.");
-  }
-
-  return apiUrl.replace(/\/+$/, "");
 }
 
 /**
@@ -247,23 +241,4 @@ function isSyncRecord(value: unknown): value is SyncRecord {
  */
 function isMetaTableName(tableName: SyncTableName): boolean {
   return META_TABLES.some((metaTableName) => metaTableName === tableName);
-}
-
-/**
- * Builds a readable sync error message from a failed HTTP response.
- *
- * We include:
- * - which phase failed (`pull` or `push`)
- * - the HTTP status code
- * - the response body when available
- *
- * This keeps UI messages and console logs actionable during integration.
- */
-async function buildSyncErrorMessage(
-  phase: "pull" | "push",
-  response: Response,
-): Promise<string> {
-  const responseText = await response.text();
-  const suffix = responseText ? `: ${responseText}` : "";
-  return `Sync ${phase} failed with ${response.status}${suffix}`;
 }

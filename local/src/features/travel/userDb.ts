@@ -1,52 +1,138 @@
-// userDb 负责当前用户资料的本地持久化，并把昵称、头像同步回 mock 业务层。
+import * as FileSystem from "expo-file-system/legacy";
 import { database } from "@/model";
 import User from "@/model/User";
+import { createUlid } from "@/lib/ids";
 import { assignModelId } from "@/lib/watermelon";
-import { readProfileAssets, saveProfileAvatarAsset } from "@/lib/profileAssets";
-import {
-  getCurrentUser,
-  updateCurrentUserProfile,
-  type UserProfile,
-} from "@/features/travel/mockApp";
 
-// UserProfileData 是页面真正消费的资料结构，已经把数据库字段和头像文件整合好了。
-export type UserProfileData = {
-  // id 与 mock/current user 的业务主键保持一致，便于跨层同步。
+// userDb 现在只负责“当前用户是谁”和“当前用户昵称是什么”这两件本地真值。
+// 头像已经改成由昵称首字生成的蓝色徽标，因此这里不再读写头像文件。
+
+const CURRENT_USER_SESSION_DIR = "current-user";
+const CURRENT_USER_SESSION_FILE = "session.json";
+const DEFAULT_CURRENT_USER_NAME = "空间用户";
+
+type CurrentUserSession = {
   id: string;
-  // nickname 是大厅、动态、位置页等场景统一展示的昵称。
   nickname: string;
-  // avatarLocalUri 来自独立的前端本地文件存储，不再放在 WatermelonDB 里。
+};
+
+export type CurrentUserIdentity = {
+  id: string;
+  username: string;
+};
+
+// UserProfileData 仍然保留 avatar 字段，是为了兼容现有页面的数据结构。
+// 这三个字段现在都会返回空字符串，页面统一走首字母蓝色徽标。
+export type UserProfileData = {
+  id: string;
+  nickname: string;
   avatarLocalUri: string;
-  // avatarRemoteUrl 作为没有本地头像时的回退地址，来源于当前用户基线资料。
   avatarRemoteUrl: string;
-  // avatarDisplayUri 专门给 React Native 渲染使用，必要时会附带版本号绕过缓存。
   avatarDisplayUri: string;
 };
 
-// toData 把 Watermelon 的昵称记录和本地头像资产拼成页面真正需要的结构。
-async function toData(
-  row: User,
-  current: UserProfile,
-): Promise<UserProfileData> {
-  const assets = await readProfileAssets(row.id);
-  return {
-    id: row.id,
-    nickname: row.nickname || "未命名用户",
-    avatarLocalUri: assets.avatarLocalUri,
-    avatarRemoteUrl: current.avatarUrl || "",
-    avatarDisplayUri: assets.avatarDisplayUri || current.avatarUrl || "",
-  };
+function getCurrentUserSessionPath() {
+  if (!FileSystem.documentDirectory) {
+    return "";
+  }
+
+  const baseDir = FileSystem.documentDirectory.endsWith("/")
+    ? FileSystem.documentDirectory
+    : `${FileSystem.documentDirectory}/`;
+  return `${baseDir}${CURRENT_USER_SESSION_DIR}/${CURRENT_USER_SESSION_FILE}`;
 }
 
-// toSeed 把内存中的当前用户映射成首次落库时写入 users 表的最小结构。
-function toSeed(current: UserProfile) {
-  return {
-    id: current.id,
-    nickname: current.nickname || current.username || "旅行者",
-  };
+async function ensureCurrentUserSessionDir() {
+  const sessionPath = getCurrentUserSessionPath();
+  if (!sessionPath) {
+    return;
+  }
+
+  const normalized = sessionPath.replace(/\\/g, "/");
+  const lastSlashIndex = normalized.lastIndexOf("/");
+  if (lastSlashIndex < 0) {
+    return;
+  }
+
+  const parentDir = normalized.slice(0, lastSlashIndex);
+  const info = await FileSystem.getInfoAsync(parentDir);
+  if (!info.exists) {
+    await FileSystem.makeDirectoryAsync(parentDir, { intermediates: true });
+  }
 }
 
-// getUserRowById 会吞掉 Watermelon `find` 在记录不存在时抛出的异常。
+function sanitizeNickname(nickname: string) {
+  const clean = nickname.trim();
+  return clean || DEFAULT_CURRENT_USER_NAME;
+}
+
+async function readCurrentUserSession(): Promise<CurrentUserSession | null> {
+  const sessionPath = getCurrentUserSessionPath();
+  if (!sessionPath) {
+    return null;
+  }
+
+  const info = await FileSystem.getInfoAsync(sessionPath);
+  if (!info.exists) {
+    return null;
+  }
+
+  try {
+    const raw = await FileSystem.readAsStringAsync(sessionPath);
+    const parsed = JSON.parse(raw) as Partial<CurrentUserSession>;
+    if (typeof parsed.id !== "string" || !parsed.id.trim()) {
+      return null;
+    }
+
+    return {
+      id: parsed.id.trim(),
+      nickname: sanitizeNickname(parsed.nickname ?? DEFAULT_CURRENT_USER_NAME),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function writeCurrentUserSession(session: CurrentUserSession) {
+  const sessionPath = getCurrentUserSessionPath();
+  if (!sessionPath) {
+    return;
+  }
+
+  await ensureCurrentUserSessionDir();
+  await FileSystem.writeAsStringAsync(
+    sessionPath,
+    JSON.stringify(session, null, 2),
+  );
+}
+
+async function ensureCurrentUserSession(): Promise<CurrentUserSession> {
+  const existing = await readCurrentUserSession();
+  if (existing) {
+    return existing;
+  }
+
+  const created: CurrentUserSession = {
+    id: createUlid(),
+    nickname: DEFAULT_CURRENT_USER_NAME,
+  };
+  await writeCurrentUserSession(created);
+  return created;
+}
+
+async function syncCurrentUserSessionNickname(nickname: string) {
+  const session = await ensureCurrentUserSession();
+  const nextNickname = sanitizeNickname(nickname);
+  if (session.nickname === nextNickname) {
+    return;
+  }
+
+  await writeCurrentUserSession({
+    ...session,
+    nickname: nextNickname,
+  });
+}
+
 async function getUserRowById(userId: string) {
   const collection = database.collections.get<User>("users");
   try {
@@ -56,58 +142,72 @@ async function getUserRowById(userId: string) {
   }
 }
 
-// ensureCurrentUserProfileInDb 会在首次启动时确保当前用户已经写入本地库。
-export async function ensureCurrentUserProfileInDb() {
-  const current = getCurrentUser();
-  const existed = await getUserRowById(current.id);
-  if (existed) {
-    return toData(existed, current);
-  }
-
-  // seed 是首次落库时使用的默认资料快照。
-  const seed = toSeed(current);
-  let created: User | null = null;
-  await database.write(async () => {
-    const collection = database.collections.get<User>("users");
-    created = await collection.create((row) => {
-      assignModelId(row, seed.id);
-      row.nickname = seed.nickname;
-    });
-  });
-
-  if (created) {
-    return toData(created, current);
-  }
-
+function toProfileData(id: string, nickname: string): UserProfileData {
   return {
-    id: seed.id,
-    nickname: seed.nickname,
+    id,
+    nickname: sanitizeNickname(nickname),
     avatarLocalUri: "",
-    avatarRemoteUrl: current.avatarUrl || "",
-    avatarDisplayUri: current.avatarUrl || "",
+    avatarRemoteUrl: "",
+    avatarDisplayUri: "",
   };
 }
 
-// getCurrentUserProfileFromDb 始终返回 mock 当前用户在本地库里的最新资料。
+export async function ensureCurrentUserIdentity(): Promise<CurrentUserIdentity> {
+  const profile = await ensureCurrentUserProfileInDb();
+  return {
+    id: profile.id,
+    username: profile.nickname,
+  };
+}
+
+// ensureCurrentUserProfileInDb 会确保“当前这台设备上的用户”有稳定 id，
+// 并且在 users 表中一定存在一条对应记录。
+export async function ensureCurrentUserProfileInDb() {
+  const session = await ensureCurrentUserSession();
+  const existed = await getUserRowById(session.id);
+  if (existed) {
+    const nextNickname = sanitizeNickname(existed.nickname || session.nickname);
+    if (nextNickname !== session.nickname) {
+      await syncCurrentUserSessionNickname(nextNickname);
+    }
+    return toProfileData(existed.id, nextNickname);
+  }
+
+  let createdUserId = session.id;
+  let createdUserNickname = session.nickname;
+
+  await database.write(async () => {
+    const collection = database.collections.get<User>("users");
+    const created = await collection.create((row) => {
+      assignModelId(row, session.id);
+      row.nickname = sanitizeNickname(session.nickname);
+    });
+    createdUserId = created.id;
+    createdUserNickname = created.nickname;
+  });
+
+  return toProfileData(createdUserId, createdUserNickname);
+}
+
 export async function getCurrentUserProfileFromDb() {
-  const current = getCurrentUser();
-  const row = await getUserRowById(current.id);
+  const session = await ensureCurrentUserSession();
+  const row = await getUserRowById(session.id);
   if (!row) {
     return ensureCurrentUserProfileInDb();
   }
-  return toData(row, current);
-}
 
-// updateCurrentUserNicknameInDb 持久化新昵称，并同步映射到 mock 空间数据里。
-export async function updateCurrentUserNicknameInDb(nickname: string) {
-  // clean 统一去掉首尾空白，避免出现“看不见”的空格昵称。
-  const clean = nickname.trim();
-  if (!clean) {
-    return getCurrentUserProfileFromDb();
+  const nextNickname = sanitizeNickname(row.nickname || session.nickname);
+  if (nextNickname !== session.nickname) {
+    await syncCurrentUserSessionNickname(nextNickname);
   }
 
-  const current = getCurrentUser();
-  const row = await getUserRowById(current.id);
+  return toProfileData(row.id, nextNickname);
+}
+
+export async function updateCurrentUserNicknameInDb(nickname: string) {
+  const clean = sanitizeNickname(nickname);
+  const session = await ensureCurrentUserSession();
+  const row = await getUserRowById(session.id);
   if (!row) {
     await ensureCurrentUserProfileInDb();
     return updateCurrentUserNicknameInDb(clean);
@@ -119,25 +219,6 @@ export async function updateCurrentUserNicknameInDb(nickname: string) {
     });
   });
 
-  updateCurrentUserProfile({ nickname: clean });
-  return getCurrentUserProfileFromDb();
-}
-
-// updateCurrentUserAvatarInDb 保存头像路径，并同步映射到 mock 空间数据里。
-export async function updateCurrentUserAvatarInDb(
-  avatarLocalUri: string,
-  avatarRemoteUrl?: string,
-) {
-  const current = getCurrentUser();
-  await ensureCurrentUserProfileInDb();
-  const nextAvatarLocalUri = await saveProfileAvatarAsset(
-    current.id,
-    avatarLocalUri,
-  );
-
-  updateCurrentUserProfile({
-    avatarLocalUri: nextAvatarLocalUri,
-    avatarRemoteUrl: avatarRemoteUrl ?? current.avatarUrl ?? "",
-  });
+  await syncCurrentUserSessionNickname(clean);
   return getCurrentUserProfileFromDb();
 }

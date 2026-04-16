@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"bytes"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -9,6 +10,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+)
+
+const (
+	writeWait      = 10 * time.Second
+	pongWait       = 60 * time.Second
+	pingPeriod     = pongWait * 9 / 10
+	maxMessageSize = 8 * 1024
 )
 
 var upgrader = websocket.Upgrader{
@@ -24,13 +32,18 @@ type Client struct {
 	send    chan []byte
 }
 
+type roomState struct {
+	clients              map[*Client]bool
+	lastLocationByUserID map[string][]byte
+}
+
 type Hub struct {
 	mu    sync.RWMutex
-	rooms map[string]map[*Client]bool
+	rooms map[string]*roomState
 }
 
 var globalHub = &Hub{
-	rooms: make(map[string]map[*Client]bool),
+	rooms: make(map[string]*roomState),
 }
 
 type BroadcastMessage struct {
@@ -40,54 +53,150 @@ type BroadcastMessage struct {
 	Timestamp int64  `json:"timestamp"`
 }
 
-func (h *Hub) register(client *Client) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if _, ok := h.rooms[client.spaceID]; !ok {
-		h.rooms[client.spaceID] = make(map[*Client]bool)
-	}
-	h.rooms[client.spaceID][client] = true
+type inboundSocketPayload struct {
+	Type string `json:"type"`
 }
 
-func (h *Hub) unregister(client *Client) {
+type memberOfflinePayload struct {
+	Type   string `json:"type"`
+	UserID string `json:"user_id"`
+	SentAt int64  `json:"sent_at"`
+}
+
+func (h *Hub) register(client *Client) [][]byte {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if _, ok := h.rooms[client.spaceID]; !ok {
+
+	room, ok := h.rooms[client.spaceID]
+	if !ok {
+		room = &roomState{
+			clients:              make(map[*Client]bool),
+			lastLocationByUserID: make(map[string][]byte),
+		}
+		h.rooms[client.spaceID] = room
+	}
+
+	room.clients[client] = true
+
+	snapshots := make([][]byte, 0, len(room.lastLocationByUserID))
+	for userID, payload := range room.lastLocationByUserID {
+		if userID == client.userID {
+			continue
+		}
+		snapshots = append(snapshots, append([]byte(nil), payload...))
+	}
+	return snapshots
+}
+
+func (h *Hub) unregister(client *Client) []byte {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	room, ok := h.rooms[client.spaceID]
+	if !ok {
+		return nil
+	}
+
+	delete(room.clients, client)
+	delete(room.lastLocationByUserID, client.userID)
+
+	if len(room.clients) == 0 {
+		delete(h.rooms, client.spaceID)
+		return nil
+	}
+
+	offlinePayload, err := json.Marshal(memberOfflinePayload{
+		Type:   "member_offline",
+		UserID: client.userID,
+		SentAt: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		return nil
+	}
+
+	envelope, err := json.Marshal(BroadcastMessage{
+		SpaceID:   client.spaceID,
+		SenderID:  client.userID,
+		Message:   string(offlinePayload),
+		Timestamp: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		return nil
+	}
+
+	return envelope
+}
+
+func (h *Hub) rememberLocation(client *Client, payload []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	room, ok := h.rooms[client.spaceID]
+	if !ok {
 		return
 	}
-	delete(h.rooms[client.spaceID], client)
-	if len(h.rooms[client.spaceID]) == 0 {
-		delete(h.rooms, client.spaceID)
-	}
+
+	room.lastLocationByUserID[client.userID] = append([]byte(nil), payload...)
 }
 
 func (h *Hub) broadcast(sender *Client, payload []byte) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	room := h.rooms[sender.spaceID]
-	for c := range room {
+
+	room, ok := h.rooms[sender.spaceID]
+	if !ok {
+		return
+	}
+
+	for c := range room.clients {
 		if c == sender {
 			continue
 		}
 		select {
 		case c.send <- payload:
 		default:
-			// drop on slow consumer
+			go func(slowClient *Client) {
+				h.forceCloseClient(slowClient)
+			}(c)
 		}
 	}
 }
 
+func (h *Hub) broadcastSystem(spaceID string, payload []byte) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	room, ok := h.rooms[spaceID]
+	if !ok {
+		return
+	}
+
+	for c := range room.clients {
+		select {
+		case c.send <- payload:
+		default:
+			go func(slowClient *Client) {
+				h.forceCloseClient(slowClient)
+			}(c)
+		}
+	}
+}
+
+func (h *Hub) forceCloseClient(client *Client) {
+	_ = client.conn.Close()
+}
+
 func WsSpace(c *gin.Context) {
 	spaceID := c.Query("space_id")
-	userID := c.DefaultQuery("user_id", "")
-	if spaceID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "space_id is required"})
+	userID := c.Query("user_id")
+	if spaceID == "" || userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "space_id and user_id are required"})
 		return
 	}
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
-		log.Println("failed to upgrade: ", err)
+		log.Println("failed to upgrade:", err)
 		return
 	}
 
@@ -97,24 +206,56 @@ func WsSpace(c *gin.Context) {
 		userID:  userID,
 		send:    make(chan []byte, 32),
 	}
-	globalHub.register(client)
+
+	snapshots := globalHub.register(client)
 	defer func() {
-		globalHub.unregister(client)
+		offlineEnvelope := globalHub.unregister(client)
+		if offlineEnvelope != nil {
+			globalHub.broadcastSystem(client.spaceID, offlineEnvelope)
+		}
 		close(client.send)
 		_ = conn.Close()
 	}()
 
 	go writePump(client)
+
+	for _, snapshot := range snapshots {
+		select {
+		case client.send <- snapshot:
+		default:
+			log.Printf("failed to replay cached location for space=%s user=%s", client.spaceID, client.userID)
+		}
+	}
+
 	readPump(client)
 }
 
 func readPump(client *Client) {
+	client.conn.SetReadLimit(maxMessageSize)
+	_ = client.conn.SetReadDeadline(time.Now().Add(pongWait))
+	client.conn.SetPongHandler(func(string) error {
+		return client.conn.SetReadDeadline(time.Now().Add(pongWait))
+	})
+
 	for {
 		_, message, err := client.conn.ReadMessage()
 		if err != nil {
-			log.Println("disconnected: ", err)
+			if websocket.IsUnexpectedCloseError(
+				err,
+				websocket.CloseGoingAway,
+				websocket.CloseAbnormalClosure,
+				websocket.CloseNoStatusReceived,
+			) {
+				log.Printf("ws disconnected unexpectedly: space=%s user=%s err=%v", client.spaceID, client.userID, err)
+			}
 			return
 		}
+
+		message = bytes.TrimSpace(message)
+		if len(message) == 0 {
+			continue
+		}
+
 		payload, err := json.Marshal(BroadcastMessage{
 			SpaceID:   client.spaceID,
 			SenderID:  client.userID,
@@ -124,14 +265,43 @@ func readPump(client *Client) {
 		if err != nil {
 			continue
 		}
+
+		if isLocationPayload(message) {
+			globalHub.rememberLocation(client, payload)
+		}
+
 		globalHub.broadcast(client, payload)
 	}
 }
 
 func writePump(client *Client) {
-	for msg := range client.send {
-		if err := client.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
-			return
+	ticker := time.NewTicker(pingPeriod)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case msg, ok := <-client.send:
+			_ = client.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if !ok {
+				_ = client.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
+			if err := client.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+				return
+			}
+		case <-ticker.C:
+			_ = client.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := client.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
 		}
 	}
+}
+
+func isLocationPayload(message []byte) bool {
+	var payload inboundSocketPayload
+	if err := json.Unmarshal(message, &payload); err != nil {
+		return false
+	}
+	return payload.Type == "location"
 }

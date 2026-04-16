@@ -2,14 +2,8 @@
 import { Q } from "@nozbe/watermelondb";
 import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useCallback, useMemo, useState } from "react";
-import {
-  Pressable,
-  SafeAreaView,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { SoftIconBadge } from "@/components/SoftIconBadge";
 import { readExpenseSplitSelections } from "@/lib/expenseSplitStore";
 import {
@@ -206,7 +200,7 @@ export default function SettlementPage() {
   const memberCount = memberUsers.length;
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={["top"]}>
       <ScrollView
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
@@ -308,7 +302,7 @@ const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: statPalette.background },
   scrollContent: {
     paddingHorizontal: 18,
-    paddingTop: 46,
+    paddingTop: 18,
     paddingBottom: 32,
     gap: 18,
   },

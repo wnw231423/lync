@@ -3,14 +3,9 @@ import { buildHttpErrorMessage, getApiBaseUrl } from "@/sync/api";
 type BindSpaceParams = {
   userId: string;
   spaceId: string;
-  name: string;
 };
 
-export async function bindSpaceOnServer({
-  userId,
-  spaceId,
-  name,
-}: BindSpaceParams) {
+export async function bindSpaceOnServer({ userId, spaceId }: BindSpaceParams) {
   const response = await fetch(`${getApiBaseUrl()}/api/v1/spaces`, {
     method: "POST",
     headers: {
@@ -19,7 +14,6 @@ export async function bindSpaceOnServer({
     },
     body: JSON.stringify({
       space_id: spaceId,
-      name,
     }),
   });
 

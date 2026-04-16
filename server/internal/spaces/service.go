@@ -3,30 +3,26 @@ package spaces
 import (
 	"errors"
 	"fmt"
-	"travel/internal/db"
 	"strings"
+	"travel/internal/db"
 
 	"gorm.io/gorm"
 )
 
 var ErrUserNotInSpace = errors.New("user is not a member of the specified space")
 
-// EnsureBinding 建立或刷新当前用户与空间的关系（POST /api/v1/spaces）；核心关系表仅维护 id / 展示字段。
-func EnsureBinding(tx *gorm.DB, userID, spaceID, name string) error {
+// EnsureBinding ensures user, space, and space_member rows exist on the server.
+// If any record is missing, it is created with just the id. Existing records are left untouched.
+// Name and other fields will be filled in later by sync push.
+func EnsureBinding(tx *gorm.DB, userID, spaceID string) error {
 	user := db.User{}
 	err := tx.Where("id = ?", userID).First(&user).Error
 	switch {
 	case err == nil:
-		if user.Nickname == "" {
-			user.Nickname = "user-" + userID
-			if err := tx.Model(&user).Update("nickname", user.Nickname).Error; err != nil {
-				return err
-			}
-		}
+		// already exists, do nothing
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		user = db.User{
-			ID:       userID,
-			Nickname: "user-" + userID,
+			ID: userID,
 		}
 		if err := tx.Create(&user).Error; err != nil {
 			return err
@@ -39,14 +35,10 @@ func EnsureBinding(tx *gorm.DB, userID, spaceID, name string) error {
 	err = tx.Where("id = ?", spaceID).First(&space).Error
 	switch {
 	case err == nil:
-		space.Name = name
-		if err := tx.Model(&space).Update("name", space.Name).Error; err != nil {
-			return err
-		}
+		// already exists, do nothing
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		space = db.Space{
-			ID:   spaceID,
-			Name: name,
+			ID: spaceID,
 		}
 		if err := tx.Create(&space).Error; err != nil {
 			return err

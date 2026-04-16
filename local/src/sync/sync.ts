@@ -69,7 +69,6 @@ async function runSync(context: SyncContext): Promise<void> {
   await bindSpaceOnServer({
     userId: context.userId,
     spaceId: context.spaceId,
-    name: " ",
   });
 
   await synchronize({

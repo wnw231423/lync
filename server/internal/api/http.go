@@ -15,7 +15,6 @@ import (
 
 type PostSpacesRequest struct {
 	SpaceID string `json:"space_id" binding:"required"`
-	Name    string `json:"name" binding:"required"`
 }
 
 type PostSyncRequest struct {
@@ -43,7 +42,7 @@ func HttpPostSpaces(c *gin.Context) {
 	}
 
 	err := db.WithTx(func(tx *gorm.DB) error {
-		return spaces.EnsureBinding(tx, userID, req.SpaceID, req.Name)
+		return spaces.EnsureBinding(tx, userID, req.SpaceID)
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

@@ -36,7 +36,8 @@ func BuildPullChanges(spaceID string, lastPulledAt int64) (map[string]PullChange
 	return changes, nil
 }
 
-// pullCoreRelationUsers 当前空间成员对应的 users，全部放入 created（不按 last_pulled_at 分类）。
+// pullCoreRelationUsers 当前空间成员对应的 users，全部放入 updated（不按 last_pulled_at 分类）。
+// WatermelonDB 对 updated 执行 upsert（有则覆盖，无则创建），避免本地已存在时 created 报错。
 func pullCoreRelationUsers(spaceID string) (PullChangeBucket, error) {
 	var rows []db.User
 	err := db.DB.Model(&db.User{}).
@@ -47,8 +48,8 @@ func pullCoreRelationUsers(spaceID string) (PullChangeBucket, error) {
 		return PullChangeBucket{}, err
 	}
 	return PullChangeBucket{
-		Created: mapUsersForPull(rows),
-		Updated: []any{},
+		Created: []any{},
+		Updated: mapUsersForPull(rows),
 		Deleted: []string{},
 	}, nil
 }
@@ -59,8 +60,8 @@ func pullCoreRelationSpaces(spaceID string) (PullChangeBucket, error) {
 		return PullChangeBucket{}, err
 	}
 	return PullChangeBucket{
-		Created: mapSpacesForPull(rows),
-		Updated: []any{},
+		Created: []any{},
+		Updated: mapSpacesForPull(rows),
 		Deleted: []string{},
 	}, nil
 }
@@ -71,8 +72,8 @@ func pullCoreRelationSpaceMembers(spaceID string) (PullChangeBucket, error) {
 		return PullChangeBucket{}, err
 	}
 	return PullChangeBucket{
-		Created: mapSpaceMembersForPull(rows),
-		Updated: []any{},
+		Created: []any{},
+		Updated: mapSpaceMembersForPull(rows),
 		Deleted: []string{},
 	}, nil
 }

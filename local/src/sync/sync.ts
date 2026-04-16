@@ -69,11 +69,12 @@ async function runSync(context: SyncContext): Promise<void> {
   await bindSpaceOnServer({
     userId: context.userId,
     spaceId: context.spaceId,
-    name: "",
+    name: " ",
   });
 
   await synchronize({
     database,
+    sendCreatedAsUpdated: true,
     // Pull is where "space isolation" really happens in the current design.
     //
     // WatermelonDB also passes `schemaVersion` and `migration` metadata into

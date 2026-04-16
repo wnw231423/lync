@@ -10,8 +10,8 @@ We use [ULID](https://ulid.page/) to identify users and spaces:
 - suited for distributed systems and lexicographically sortable
 - encoded as a **26** char string
 - libraries:
-  - [npm ulid](https://www.npmjs.com/package/ulid)
-  - [go ulid](https://github.com/oklog/ulid)
+    - [npm ulid](https://www.npmjs.com/package/ulid)
+    - [go ulid](https://github.com/oklog/ulid)
 
 ## Local-First Data
 
@@ -71,16 +71,13 @@ In the frontend, we use `watermelonDB`, which offers local-first capacity. The b
 - 时间戳采用13位Unix时间戳
 - created_at和updated_at由watermelonDB在定义model时使用`@date('created_at')`和`@date('updated_at')`装饰器产生，用于数据同步时的创建/更新
 - deleted_at字段用于服务器实现“软删除”
-- 业务逻辑注意事项：
-  - `users`、`spaces`、`space_members` 为**核心关系表**：Pull 时整包放入 `created`，Push 时不做 delete/conflict/`last_modified` 逻辑，见 `docs/sync-degisn.md`。
-  - `photos`、`expenses`、`comments`、`posts` 为**普通数据表**，增量同步与冲突规则一致。
 - photo的local_uri统一为：`${App存储目录}/photos/${photo_id}.jpg`.前端需处理文件不存在的异常情况。
 
 ## Real-time Data
 
 - location：
-  - latitude(纬度)：Float
-  - longitude(经度)：Float
+    - latitude(纬度)：Float
+    - longitude(经度)：Float
 - battery: Int (0-100)
 - updated_at(最后一次更新的时间戳): Number
 

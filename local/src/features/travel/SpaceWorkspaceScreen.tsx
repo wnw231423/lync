@@ -9,6 +9,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentProps,
   type ComponentRef,
   type ReactNode,
 } from "react";
@@ -54,7 +55,6 @@ import {
 } from "@/lib/watermelon";
 import {
   createSpaceLocally,
-  disbandSpaceLocally,
   getSpaceSnapshotFromDb,
   leaveSpaceLocally,
   listJoinedSpacesFromDb,
@@ -64,6 +64,7 @@ import {
 import {
   ensureCurrentUserProfileInDb,
   getCurrentUserProfileFromDb,
+  updateCurrentUserNicknameInDb,
   type UserProfileData,
 } from "@/features/travel/userDb";
 import { styles, workspaceTheme } from "@/features/travel/spaceWorkspaceStyles";
@@ -129,6 +130,16 @@ type UserAvatarProps = {
   name: string;
   size?: number;
   textSize?: number;
+};
+
+type ActionMenuItem = {
+  key: string;
+  label: string;
+  description: string;
+  icon: ComponentProps<typeof Ionicons>["name"];
+  onPress: () => void;
+  tone?: "warn";
+  danger?: boolean;
 };
 
 let imagePickerModuleCache: ImagePickerModule | null | undefined;
@@ -359,6 +370,9 @@ export function SpaceWorkspaceScreen({
   const [createdCodeVisible, setCreatedCodeVisible] = useState(false);
   const [createdSpaceCode, setCreatedSpaceCode] = useState("");
   const [shareCodeVisible, setShareCodeVisible] = useState(false);
+  const [nicknameModalVisible, setNicknameModalVisible] = useState(false);
+  const [nicknameInput, setNicknameInput] = useState("");
+  const [savingNickname, setSavingNickname] = useState(false);
 
   // 这一组 ref 主要给动画、滚动阈值和评论输入焦点管理使用。
   const currentProfileRef = useRef<UserProfileData | null>(null);
@@ -705,6 +719,32 @@ export function SpaceWorkspaceScreen({
 
   const profileName = currentUserName;
   const profileAvatarUri = "";
+
+  const openNicknameDialog = useCallback(() => {
+    setNicknameInput(profileName);
+    setNicknameModalVisible(true);
+  }, [profileName]);
+
+  const onSaveNickname = useCallback(async () => {
+    const cleanNickname = nicknameInput.trim();
+    if (!cleanNickname) {
+      Alert.alert("提示", "昵称不能为空。");
+      return;
+    }
+
+    setSavingNickname(true);
+    try {
+      const nextProfile = await updateCurrentUserNicknameInDb(cleanNickname);
+      setCurrentProfile(nextProfile);
+      setNicknameInput(nextProfile.nickname);
+      setNicknameModalVisible(false);
+      Alert.alert("已保存", "昵称已经更新。");
+    } catch (error) {
+      Alert.alert("保存失败", String(error));
+    } finally {
+      setSavingNickname(false);
+    }
+  }, [nicknameInput]);
 
   const activateSpace = useCallback(
     async (spaceCode: string) => {
@@ -1087,20 +1127,6 @@ export function SpaceWorkspaceScreen({
     void refreshWorkspace();
   };
 
-  const onDisbandSpace = async () => {
-    if (!currentSpace) {
-      return;
-    }
-    setMenuOpen(false);
-    const ok = await disbandSpaceLocally(currentSpace.id);
-    if (!ok) {
-      Alert.alert("解散失败", "没有找到当前空间。");
-      return;
-    }
-    setSidebarVisible(false);
-    void refreshWorkspace();
-  };
-
   const openBookkeeping = () => {
     if (!activeSpaceCodeRef.current) {
       return;
@@ -1161,7 +1187,7 @@ export function SpaceWorkspaceScreen({
       await clipboard.setStringAsync(shareToken);
       Alert.alert(
         "已复制",
-        "分享口令已复制。把“空间名_ID号”发给好友，对方粘贴后就能加入空间。",
+        "分享口令已复制。把“分享口令”发给好友，对方粘贴后就能加入空间。",
       );
     } catch {
       Alert.alert("复制失败", "这次没有复制成功，请稍后再试。");
@@ -1176,11 +1202,11 @@ export function SpaceWorkspaceScreen({
     setShareCodeVisible(true);
   };
 
-  const actionMenuItems = [
+  const actionMenuItems: ActionMenuItem[] = [
     {
       key: "share",
       label: "分享空间",
-      description: "复制“空间名_ID号”发给好友",
+      description: "复制空间口令发给好友",
       icon: "copy-outline" as const,
       onPress: openShareDialog,
     },
@@ -1205,14 +1231,6 @@ export function SpaceWorkspaceScreen({
       icon: "log-out-outline" as const,
       tone: "warn" as const,
       onPress: onLeaveSpace,
-    },
-    {
-      key: "disband",
-      description: "永久删除此空间",
-      label: "解散空间",
-      icon: "trash-outline" as const,
-      danger: true,
-      onPress: onDisbandSpace,
     },
   ];
 
@@ -1716,10 +1734,7 @@ export function SpaceWorkspaceScreen({
               </Pressable>
             </View>
 
-            <Pressable
-              style={styles.sidebarProfileCard}
-              onPress={() => router.push("/profile")}
-            >
+            <View style={styles.sidebarProfileCard}>
               <UserAvatar
                 uri={profileAvatarUri}
                 name={profileName}
@@ -1727,12 +1742,22 @@ export function SpaceWorkspaceScreen({
                 textSize={18}
               />
               <View style={styles.sidebarProfileTextWrap}>
-                <Text style={styles.sidebarProfileName}>{profileName}</Text>
-                <Text style={styles.sidebarProfileSubText}>
-                  点击进入个人资料页
+                <Text style={styles.sidebarProfileName} numberOfLines={1}>
+                  {profileName}
                 </Text>
+                <Pressable
+                  style={styles.sidebarProfileEditButton}
+                  onPress={openNicknameDialog}
+                >
+                  <Ionicons
+                    name="create-outline"
+                    size={14}
+                    color={workspaceTheme.accentStrong}
+                  />
+                  <Text style={styles.sidebarProfileEditText}>修改名字</Text>
+                </Pressable>
               </View>
-            </Pressable>
+            </View>
 
             <View style={styles.sidebarSectionHeader}>
               <Text style={styles.sidebarSectionTitle}>空间列表</Text>
@@ -1781,15 +1806,6 @@ export function SpaceWorkspaceScreen({
                       </View>
                       <Text
                         style={[
-                          styles.sidebarSpaceCode,
-                          active && styles.sidebarSpaceCodeActive,
-                        ]}
-                        numberOfLines={1}
-                      >
-                        {formatSharedSpaceToken(item.name, item.code)}
-                      </Text>
-                      <Text
-                        style={[
                           styles.sidebarSpaceMeta,
                           active && styles.sidebarSpaceMetaActive,
                         ]}
@@ -1831,9 +1847,51 @@ export function SpaceWorkspaceScreen({
       </View>
 
       <CenterDialog
+        visible={nicknameModalVisible}
+        title="修改昵称"
+        description="输入新的昵称"
+        onClose={() => {
+          if (savingNickname) {
+            return;
+          }
+          setNicknameModalVisible(false);
+        }}
+        footer={
+          <View style={styles.dialogActionRow}>
+            <Pressable
+              style={styles.dialogGhostButton}
+              onPress={() => setNicknameModalVisible(false)}
+              disabled={savingNickname}
+            >
+              <Text style={styles.dialogGhostButtonText}>取消</Text>
+            </Pressable>
+            <Pressable
+              style={styles.dialogPrimaryButton}
+              onPress={() => void onSaveNickname()}
+              disabled={savingNickname}
+            >
+              <Text style={styles.dialogPrimaryButtonText}>
+                {savingNickname ? "保存中..." : "保存"}
+              </Text>
+            </Pressable>
+          </View>
+        }
+      >
+        <TextInput
+          value={nicknameInput}
+          onChangeText={setNicknameInput}
+          placeholder="输入你的昵称"
+          placeholderTextColor={workspaceTheme.placeholder}
+          maxLength={24}
+          autoFocus
+          style={styles.dialogInput}
+        />
+      </CenterDialog>
+
+      <CenterDialog
         visible={createModalVisible}
         title="创建空间"
-        description="这里会先在本地创建空间，空间名称固定下来；之后是否同步，由你手动决定。"
+        description="这里会先在本地创建空间；之后是否同步，由你手动决定。"
         onClose={() => setCreateModalVisible(false)}
         footer={
           <View style={styles.dialogActionRow}>
@@ -1862,15 +1920,13 @@ export function SpaceWorkspaceScreen({
           maxLength={8}
           style={styles.dialogInput}
         />
-        <Text style={styles.dialogHelperText}>
-          请输入最多 8 个字的空间名，创建后名称将固定。
-        </Text>
+        <Text style={styles.dialogHelperText}>请输入最多 8 个字的空间名。</Text>
       </CenterDialog>
 
       <CenterDialog
         visible={shareCodeVisible}
         title="分享空间"
-        description="复制下面的分享口令发给好友，让对方粘贴“空间名_ID号”加入当前空间。"
+        description="复制空间口令发给好友"
         onClose={() => setShareCodeVisible(false)}
         footer={
           <View style={styles.dialogActionRow}>
@@ -1952,7 +2008,7 @@ export function SpaceWorkspaceScreen({
       <CenterDialog
         visible={createdCodeVisible}
         title="新空间已创建"
-        description="你已经进入新空间，复制下面的分享口令发给好友，让对方粘贴“空间名_ID号”加入空间。"
+        description="复制空间口令发给好友"
         onClose={() => setCreatedCodeVisible(false)}
         footer={
           <View style={styles.dialogActionRow}>

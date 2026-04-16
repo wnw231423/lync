@@ -26,6 +26,7 @@ const palette = {
 // workspaceTheme 暴露给组件逻辑层使用的少量语义化颜色。
 export const workspaceTheme = {
   icon: palette.accent,
+  accentStrong: palette.accentStrong,
   iconMuted: palette.textSecondary,
   placeholder: palette.textTertiary,
   iconOnAccent: "#FFFFFF",
@@ -867,17 +868,31 @@ export const styles = StyleSheet.create({
   },
   sidebarProfileTextWrap: {
     flex: 1,
+    minWidth: 0,
+    paddingLeft: 4,
+    gap: 10,
   },
   sidebarProfileName: {
     color: palette.textPrimary,
     fontSize: 16,
     fontWeight: "800",
   },
-  sidebarProfileSubText: {
-    marginTop: 5,
-    color: palette.textSecondary,
+  sidebarProfileEditButton: {
+    alignSelf: "flex-start",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: palette.accentSoftBorder,
+    backgroundColor: palette.accentSoft,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+  },
+  sidebarProfileEditText: {
+    color: palette.accentStrong,
     fontSize: 11,
-    lineHeight: 18,
+    fontWeight: "700",
   },
   sidebarSectionHeader: {
     marginTop: 20,

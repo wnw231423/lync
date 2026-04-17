@@ -58,7 +58,6 @@ export default function ProfilePage() {
     () => profile?.nickname || "空间用户",
     [profile?.nickname],
   );
-  const userId = profile?.id || "";
 
   const loadProfile = useCallback(async () => {
     await ensureCurrentUserProfileInDb();
@@ -102,7 +101,7 @@ export default function ProfilePage() {
   };
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={["top"]}>
       <View style={styles.backgroundOrbTop} />
       <View style={styles.backgroundOrbBottom} />
 
@@ -133,7 +132,6 @@ export default function ProfilePage() {
 
               <View style={styles.profileTextWrap}>
                 <Text style={styles.displayName}>{displayName}</Text>
-                <Text style={styles.userIdText}>ID号 · {userId}</Text>
               </View>
             </View>
 
@@ -263,12 +261,6 @@ const styles = StyleSheet.create({
     color: profilePalette.text,
     fontSize: 24,
     fontWeight: "800",
-  },
-  userIdText: {
-    marginTop: 8,
-    color: profilePalette.muted,
-    fontSize: 12,
-    fontWeight: "600",
   },
   editorBlock: {
     marginTop: 18,

@@ -7,13 +7,13 @@ import {
   Alert,
   Modal,
   Pressable,
-  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { SoftIconBadge } from "@/components/SoftIconBadge";
 import {
   deleteExpenseSplitSelection,
@@ -350,7 +350,7 @@ export default function BookkeepingPage() {
 
   if (!space) {
     return (
-      <SafeAreaView style={styles.safeArea}>
+      <SafeAreaView style={styles.safeArea} edges={["top"]}>
         <View style={styles.emptyContainer}>
           <Text style={styles.emptyTitle}>记账页面暂时不可用</Text>
           <Pressable
@@ -365,7 +365,7 @@ export default function BookkeepingPage() {
   }
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={["top"]}>
       <ScrollView
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
@@ -441,7 +441,7 @@ export default function BookkeepingPage() {
             <View style={styles.sectionHeaderTextWrap}>
               <Text style={styles.sectionTitle}>历史账单</Text>
               <Text style={styles.sectionSubtitle}>
-                这里可以为每笔账单设置“所有成员AA”或“部分成员AA”，只影响本地结算计算。
+                这里可以为每笔账单设置“所有成员AA”或“部分成员AA”。
               </Text>
             </View>
           </View>
@@ -478,7 +478,7 @@ export default function BookkeepingPage() {
                   付款人：{userNameById.get(item.payerId) || "未知成员"}
                 </Text>
                 <Text style={styles.listSplitText}>
-                  分摊方式：{buildSplitSummary(item.id)}
+                  {buildSplitSummary(item.id)}
                 </Text>
                 <Text style={styles.listTime}>
                   {formatDate(item.createdAt)}
@@ -518,9 +518,7 @@ export default function BookkeepingPage() {
                 ? `当前账单：${editingExpense.description}`
                 : "为这笔账单设置本地分摊方式。"}
             </Text>
-            <Text style={styles.modalHint}>
-              这里只影响“查看结算”的本地计算，不会写入数据库。
-            </Text>
+            <Text style={styles.modalHint}>请选择这笔账单的分摊成员。</Text>
 
             <View style={styles.modeRow}>
               <Pressable
@@ -623,7 +621,7 @@ const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: ledgerPalette.background },
   scrollContent: {
     paddingHorizontal: 18,
-    paddingTop: 46,
+    paddingTop: 18,
     paddingBottom: 32,
     gap: 18,
   },

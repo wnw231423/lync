@@ -1,17 +1,17 @@
-// 位置共享页：进入页面后先征求定位授权，拿到当前用户坐标后通过 WebSocket 广播。
-// 其他成员的位置消息同样通过 `/api/v1/ws` 接收，并渲染到本地地图上。
 import * as Location from "expo-location";
 import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
+  Linking,
+  Platform,
   Pressable,
-  SafeAreaView,
   StyleSheet,
   Text,
   View,
 } from "react-native";
-import WebView from "react-native-webview";
+import { SafeAreaView } from "react-native-safe-area-context";
+import WebView, { type WebViewMessageEvent } from "react-native-webview";
 import {
   getSpaceSnapshotFromDb,
   type SpaceData,
@@ -35,14 +35,21 @@ const mapPalette = {
   shadow: "#BFDCCC",
 };
 
+const WEB_LOCATION_REUSE_MS = 5 * 60 * 1000;
+const WEB_LOCATION_COOLDOWN_MS = 60 * 1000;
+const PUBLISHED_LOCATION_REUSE_MS = 90 * 1000;
+const PUBLISHED_LOCATION_REFRESH_GRACE_MS = 30 * 1000;
+
 type PermissionState = "checking" | "prompting" | "granted" | "denied";
 type SocketState = "idle" | "connecting" | "connected" | "error";
+type CoordinateSystem = "gps" | "bd09";
 
 type MemberMarker = {
   id: string;
   name: string;
   latitude: number;
   longitude: number;
+  coordinateSystem: CoordinateSystem;
   isCurrentUser: boolean;
   updatedAt: number;
 };
@@ -52,6 +59,7 @@ type SocketLocationPayload = {
   latitude: number;
   longitude: number;
   accuracy?: number | null;
+  coordinate_system?: CoordinateSystem;
   nickname?: string;
   sent_at?: number;
 };
@@ -60,6 +68,51 @@ type SocketRequestPayload = {
   type: "request_location";
 };
 
+type SocketMemberOfflinePayload = {
+  type: "member_offline";
+  user_id: string;
+  sent_at?: number;
+};
+
+type WebViewMapReadyPayload = {
+  type: "map_ready";
+};
+
+type WebViewLocationPayload = {
+  type: "web_location";
+  latitude: number;
+  longitude: number;
+  accuracy?: number | null;
+  coordinate_system?: CoordinateSystem;
+  sent_at?: number;
+};
+
+type WebViewLocationErrorPayload = {
+  type: "web_location_error";
+  message?: string;
+};
+
+type WebViewInboundPayload =
+  | WebViewMapReadyPayload
+  | WebViewLocationPayload
+  | WebViewLocationErrorPayload;
+
+type WebViewOutboundPayload =
+  | {
+      type: "sync_markers";
+      markers: {
+        id: string;
+        name: string;
+        latitude: number;
+        longitude: number;
+        coordinateSystem: CoordinateSystem;
+        isCurrentUser: boolean;
+      }[];
+    }
+  | {
+      type: "request_web_location";
+    };
+
 type WsEnvelope = {
   space_id?: string;
   sender_id?: string;
@@ -67,10 +120,21 @@ type WsEnvelope = {
   timestamp?: number;
 };
 
-function buildMapHtml(markers: MemberMarker[], baiduMapAk: string) {
-  const safeMarkers = JSON.stringify(markers);
-  return `
-<!DOCTYPE html>
+type ResolvedLocation = {
+  coords: Location.LocationObjectCoords;
+  usedLastKnown: boolean;
+  source: "native" | "last_known" | "webview_browser" | "webview_baidu";
+  coordinateSystem: CoordinateSystem;
+};
+
+type PublishedLocationCache = {
+  result: ResolvedLocation;
+  resolvedAt: number;
+  lastBroadcastAt: number;
+};
+
+function buildMapHtml(baiduMapAk: string) {
+  return `<!DOCTYPE html>
 <html>
   <head>
     <meta charset="utf-8" />
@@ -95,7 +159,6 @@ function buildMapHtml(markers: MemberMarker[], baiduMapAk: string) {
     <div id="map"></div>
     <script src="https://api.map.baidu.com/api?v=3.0&ak=${baiduMapAk}"></script>
     <script>
-      const markers = ${safeMarkers};
       const fallbackPoint = new BMap.Point(121.4737, 31.2304);
       const map = new BMap.Map("map", { enableMapClick: false });
       map.centerAndZoom(fallbackPoint, 12);
@@ -112,26 +175,59 @@ function buildMapHtml(markers: MemberMarker[], baiduMapAk: string) {
         ]
       });
 
-      function addMarkers(convertedMarkers) {
-        if (!convertedMarkers.length) {
+      let markerOverlays = [];
+      const convertedMarkerCache = new Map();
+      let latestWebLocation = null;
+
+      function postToApp(payload) {
+        if (
+          window.ReactNativeWebView &&
+          typeof window.ReactNativeWebView.postMessage === "function"
+        ) {
+          window.ReactNativeWebView.postMessage(JSON.stringify(payload));
+        }
+      }
+
+      function clearMarkerOverlays() {
+        markerOverlays.forEach((overlay) => map.removeOverlay(overlay));
+        markerOverlays = [];
+      }
+
+      function buildMarkerCacheKey(marker) {
+        return (
+          String(marker.id || "") +
+          ":" +
+          Number(marker.latitude).toFixed(6) +
+          ":" +
+          Number(marker.longitude).toFixed(6)
+        );
+      }
+
+      function buildLabelText(marker) {
+        return marker.isCurrentUser ? marker.name + "（我）" : marker.name;
+      }
+
+      function appendMarkerOverlays(renderedMarkers) {
+        clearMarkerOverlays();
+
+        if (!renderedMarkers.length) {
+          map.centerAndZoom(fallbackPoint, 12);
           return;
         }
 
         const viewportPoints = [];
-        convertedMarkers.forEach((marker) => {
+        renderedMarkers.forEach((marker) => {
           const point = new BMap.Point(marker.longitude, marker.latitude);
           viewportPoints.push(point);
 
           const markerNode = new BMap.Marker(point);
           map.addOverlay(markerNode);
+          markerOverlays.push(markerNode);
 
-          const label = new BMap.Label(
-            marker.name + (marker.isCurrentUser ? "（我）" : ""),
-            {
-              position: point,
-              offset: new BMap.Size(12, -26),
-            }
-          );
+          const label = new BMap.Label(buildLabelText(marker), {
+            position: point,
+            offset: new BMap.Size(12, -26),
+          });
           label.setStyle({
             color: "#0F172A",
             border: "1px solid #DDEDE3",
@@ -143,6 +239,7 @@ function buildMapHtml(markers: MemberMarker[], baiduMapAk: string) {
             boxShadow: "0 8px 18px rgba(15, 23, 42, 0.12)",
           });
           map.addOverlay(label);
+          markerOverlays.push(label);
 
           const circle = new BMap.Circle(point, 55, {
             strokeColor: marker.isCurrentUser ? "#10B981" : "#2563EB",
@@ -152,6 +249,7 @@ function buildMapHtml(markers: MemberMarker[], baiduMapAk: string) {
             fillOpacity: 0.18,
           });
           map.addOverlay(circle);
+          markerOverlays.push(circle);
         });
 
         if (viewportPoints.length === 1) {
@@ -161,35 +259,240 @@ function buildMapHtml(markers: MemberMarker[], baiduMapAk: string) {
         }
       }
 
-      if (markers.length) {
-        const gpsPoints = markers.map(
+      function renderMarkers(markers) {
+        if (!Array.isArray(markers) || !markers.length) {
+          appendMarkerOverlays([]);
+          return;
+        }
+
+        const bd09Markers = markers
+          .filter((marker) => marker.coordinateSystem === "bd09")
+          .map((marker) => ({ ...marker }));
+        const gpsMarkers = markers.filter(
+          (marker) => marker.coordinateSystem !== "bd09"
+        );
+
+        if (!gpsMarkers.length) {
+          appendMarkerOverlays(bd09Markers);
+          return;
+        }
+
+        const cachedConvertedMarkers = [];
+        const pendingGpsMarkers = [];
+
+        gpsMarkers.forEach((marker) => {
+          const cacheKey = buildMarkerCacheKey(marker);
+          const cachedPoint = convertedMarkerCache.get(cacheKey);
+          if (cachedPoint) {
+            cachedConvertedMarkers.push({
+              ...marker,
+              longitude: cachedPoint.lng,
+              latitude: cachedPoint.lat,
+            });
+            return;
+          }
+
+          pendingGpsMarkers.push(marker);
+        });
+
+        if (!pendingGpsMarkers.length) {
+          appendMarkerOverlays(bd09Markers.concat(cachedConvertedMarkers));
+          return;
+        }
+
+        appendMarkerOverlays(
+          bd09Markers.concat(cachedConvertedMarkers).concat(pendingGpsMarkers)
+        );
+
+        const gpsPoints = pendingGpsMarkers.map(
           (marker) => new BMap.Point(marker.longitude, marker.latitude)
         );
         const convertor = new BMap.Convertor();
         convertor.translate(gpsPoints, 1, 5, function (data) {
           if (!data || data.status !== 0 || !Array.isArray(data.points)) {
-            addMarkers(markers);
+            appendMarkerOverlays(
+              bd09Markers.concat(
+                cachedConvertedMarkers,
+                pendingGpsMarkers.map((marker) => ({
+                  ...marker,
+                }))
+              )
+            );
             return;
           }
 
-          const convertedMarkers = markers.map((marker, index) => ({
-            ...marker,
-            longitude: data.points[index]?.lng ?? marker.longitude,
-            latitude: data.points[index]?.lat ?? marker.latitude,
-          }));
-          addMarkers(convertedMarkers);
+          const convertedMarkers = pendingGpsMarkers.map((marker, index) => {
+            const nextMarker = {
+              ...marker,
+              longitude: data.points[index]?.lng ?? marker.longitude,
+              latitude: data.points[index]?.lat ?? marker.latitude,
+            };
+            convertedMarkerCache.set(buildMarkerCacheKey(marker), {
+              lng: nextMarker.longitude,
+              lat: nextMarker.latitude,
+            });
+            return nextMarker;
+          });
+
+          appendMarkerOverlays(
+            bd09Markers.concat(cachedConvertedMarkers).concat(convertedMarkers)
+          );
         });
       }
+
+      function postWebLocation(payload) {
+        latestWebLocation = payload;
+        postToApp(payload);
+      }
+
+      function requestBaiduWebLocation(previousMessage) {
+        if (latestWebLocation && latestWebLocation.coordinate_system === "bd09") {
+          postToApp(latestWebLocation);
+          return;
+        }
+
+        if (!BMap.Geolocation) {
+          postToApp({
+            type: "web_location_error",
+            message:
+              previousMessage ||
+              "当前设备无法使用百度网页定位，请检查定位服务和网络连接。",
+          });
+          return;
+        }
+
+        const geolocation = new BMap.Geolocation();
+        geolocation.getCurrentPosition(
+          function (result) {
+            const status = typeof this.getStatus === "function" ? this.getStatus() : -1;
+            if (
+              (status === 0 || status === window.BMAP_STATUS_SUCCESS) &&
+              result &&
+              result.point
+            ) {
+              postWebLocation({
+                type: "web_location",
+                latitude: result.point.lat,
+                longitude: result.point.lng,
+                accuracy:
+                  typeof result.accuracy === "number" ? result.accuracy : null,
+                coordinate_system: "bd09",
+                sent_at: Date.now(),
+              });
+              return;
+            }
+
+            postToApp({
+              type: "web_location_error",
+              message:
+                previousMessage ||
+                "百度网页定位未能返回坐标，请检查系统定位和网络连接。",
+            });
+          },
+          {
+            enableHighAccuracy: true,
+          }
+        );
+      }
+
+      function startBrowserWatch() {
+        if (!navigator.geolocation || browserWatchStarted) {
+          return;
+        }
+
+        browserWatchStarted = true;
+        navigator.geolocation.watchPosition(
+          function (position) {
+            postWebLocation({
+              type: "web_location",
+              latitude: position.coords.latitude,
+              longitude: position.coords.longitude,
+              accuracy: position.coords.accuracy || null,
+              coordinate_system: "gps",
+              sent_at: Date.now(),
+            });
+          },
+          function () {
+            // 某些设备会拒绝持续监听，这里静默处理，保留一次性定位回退。
+          },
+          {
+            enableHighAccuracy: true,
+            maximumAge: 0,
+            timeout: 20000,
+          }
+        );
+      }
+
+      function requestBrowserLocation() {
+        if (!navigator.geolocation) {
+          requestBaiduWebLocation("当前设备的 WebView 不支持浏览器定位。");
+          return;
+        }
+
+        if (
+          latestWebLocation &&
+          latestWebLocation.coordinate_system === "gps" &&
+          Date.now() - (latestWebLocation.sent_at || 0) < 120000
+        ) {
+          postToApp(latestWebLocation);
+          return;
+        }
+
+        navigator.geolocation.getCurrentPosition(
+          function (position) {
+            postWebLocation({
+              type: "web_location",
+              latitude: position.coords.latitude,
+              longitude: position.coords.longitude,
+              accuracy: position.coords.accuracy || null,
+              coordinate_system: "gps",
+              sent_at: Date.now(),
+            });
+          },
+          function (error) {
+            requestBaiduWebLocation(
+              error && error.message
+                ? error.message
+                : "浏览器定位失败，正在切换到百度兼容定位。"
+            );
+          },
+          {
+            enableHighAccuracy: true,
+            timeout: 12000,
+            maximumAge: 0,
+          }
+        );
+      }
+
+      function handleBridgeMessage(event) {
+        try {
+          const parsed = JSON.parse(String(event.data || ""));
+          if (parsed.type === "sync_markers") {
+            renderMarkers(Array.isArray(parsed.markers) ? parsed.markers : []);
+            return;
+          }
+          if (parsed.type === "request_web_location") {
+            requestBrowserLocation();
+          }
+        } catch (error) {
+          // 忽略格式不正确的桥接消息。
+        }
+      }
+
+      document.addEventListener("message", handleBridgeMessage);
+      window.addEventListener("message", handleBridgeMessage);
+      postToApp({ type: "map_ready" });
     </script>
   </body>
 </html>`;
 }
 
-function formatTime(ts: number) {
-  if (!ts) {
+function formatTime(timestamp: number) {
+  if (!timestamp) {
     return "刚刚";
   }
-  return new Date(ts).toLocaleTimeString("zh-CN", {
+
+  return new Date(timestamp).toLocaleTimeString("zh-CN", {
     hour: "2-digit",
     minute: "2-digit",
   });
@@ -197,24 +500,22 @@ function formatTime(ts: number) {
 
 function parseIncomingLocation(message: string): SocketLocationPayload | null {
   try {
-    const parsed = JSON.parse(message) as Partial<
-      SocketLocationPayload | SocketRequestPayload
-    >;
-    if (parsed.type !== "location") {
-      return null;
-    }
+    const parsed = JSON.parse(message) as Partial<SocketLocationPayload>;
     if (
+      parsed.type !== "location" ||
       typeof parsed.latitude !== "number" ||
       typeof parsed.longitude !== "number"
     ) {
       return null;
     }
+
     return {
       type: "location",
       latitude: parsed.latitude,
       longitude: parsed.longitude,
       accuracy:
         typeof parsed.accuracy === "number" ? parsed.accuracy : undefined,
+      coordinate_system: parsed.coordinate_system === "bd09" ? "bd09" : "gps",
       nickname: typeof parsed.nickname === "string" ? parsed.nickname : "",
       sent_at: typeof parsed.sent_at === "number" ? parsed.sent_at : Date.now(),
     };
@@ -232,6 +533,186 @@ function isLocationRequestMessage(message: string) {
   }
 }
 
+function parseMemberOfflineMessage(
+  message: string,
+): SocketMemberOfflinePayload | null {
+  try {
+    const parsed = JSON.parse(message) as Partial<SocketMemberOfflinePayload>;
+    if (
+      parsed.type !== "member_offline" ||
+      typeof parsed.user_id !== "string"
+    ) {
+      return null;
+    }
+
+    return {
+      type: "member_offline",
+      user_id: parsed.user_id,
+      sent_at: typeof parsed.sent_at === "number" ? parsed.sent_at : Date.now(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseWebViewMessage(rawMessage: string): WebViewInboundPayload | null {
+  try {
+    const parsed = JSON.parse(rawMessage) as Partial<WebViewInboundPayload>;
+
+    if (parsed.type === "map_ready") {
+      return { type: "map_ready" };
+    }
+
+    if (
+      parsed.type === "web_location" &&
+      typeof parsed.latitude === "number" &&
+      typeof parsed.longitude === "number"
+    ) {
+      return {
+        type: "web_location",
+        latitude: parsed.latitude,
+        longitude: parsed.longitude,
+        accuracy:
+          typeof parsed.accuracy === "number" ? parsed.accuracy : undefined,
+        coordinate_system: parsed.coordinate_system === "bd09" ? "bd09" : "gps",
+        sent_at:
+          typeof parsed.sent_at === "number" ? parsed.sent_at : Date.now(),
+      };
+    }
+
+    if (parsed.type === "web_location_error") {
+      return {
+        type: "web_location_error",
+        message: typeof parsed.message === "string" ? parsed.message : "",
+      };
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function buildCoords(
+  latitude: number,
+  longitude: number,
+  accuracy?: number | null,
+): Location.LocationObjectCoords {
+  return {
+    latitude,
+    longitude,
+    accuracy: typeof accuracy === "number" ? accuracy : null,
+    altitude: null,
+    altitudeAccuracy: null,
+    heading: null,
+    speed: null,
+  };
+}
+
+function getAccuracyValue(accuracy?: number | null) {
+  if (typeof accuracy !== "number" || !Number.isFinite(accuracy)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return accuracy;
+}
+
+function isUnsupportedAndroidLocationError(error: unknown) {
+  const rawMessage =
+    error instanceof Error ? error.message : String(error ?? "");
+  const lowerMessage = rawMessage.toLowerCase();
+
+  return (
+    lowerMessage.includes("locationservices.api") ||
+    lowerMessage.includes("service_invalid") ||
+    lowerMessage.includes("connectionresult") ||
+    lowerMessage.includes("api is not available on this device") ||
+    lowerMessage.includes("google play")
+  );
+}
+
+function getFriendlyLocationErrorMessage(error: unknown) {
+  const rawMessage =
+    error instanceof Error ? error.message : String(error ?? "未知错误");
+  const lowerMessage = rawMessage.toLowerCase();
+
+  if (
+    lowerMessage.includes("permission") ||
+    lowerMessage.includes("denied") ||
+    lowerMessage.includes("not granted")
+  ) {
+    return "还没有获得定位权限，请在系统设置中允许应用访问定位后再试。";
+  }
+
+  if (
+    lowerMessage.includes("locationservices.api") ||
+    lowerMessage.includes("service_invalid") ||
+    lowerMessage.includes("connectionresult") ||
+    lowerMessage.includes("google play") ||
+    lowerMessage.includes("webview") ||
+    lowerMessage.includes("browser") ||
+    lowerMessage.includes("geolocation")
+  ) {
+    return "当前设备的定位组件兼容性有限，系统已经自动切换到兼容定位链路。请确认系统定位、网络连接和 WebView 权限都已开启。";
+  }
+
+  if (
+    lowerMessage.includes("location services") ||
+    lowerMessage.includes("current location is unavailable") ||
+    lowerMessage.includes("provider") ||
+    lowerMessage.includes("gps")
+  ) {
+    return "当前设备暂时无法获取实时定位，请确认系统定位服务已经开启，并尽量在室外或靠近窗边后重试。";
+  }
+
+  if (lowerMessage.includes("timeout")) {
+    return "定位超时了，请确认当前网络环境和系统定位服务都可用后再试。";
+  }
+
+  return `获取定位失败：${rawMessage}`;
+}
+
+function shouldSuggestOpeningSettings(message: string) {
+  return (
+    message.includes("系统定位") ||
+    message.includes("权限") ||
+    message.includes("WebView")
+  );
+}
+
+function getSocketStatusLabel(socketState: SocketState) {
+  if (socketState === "connected") {
+    return "已连接";
+  }
+  if (socketState === "connecting") {
+    return "连接中";
+  }
+  if (socketState === "error") {
+    return "连接异常";
+  }
+  return "未连接";
+}
+
+function chooseBetterLocation(
+  nativeLocation: ResolvedLocation,
+  webLocation: ResolvedLocation | null,
+) {
+  if (!webLocation) {
+    return nativeLocation;
+  }
+
+  const nativeAccuracy = getAccuracyValue(nativeLocation.coords.accuracy);
+  const webAccuracy = getAccuracyValue(webLocation.coords.accuracy);
+  if (
+    nativeAccuracy > 300 &&
+    Number.isFinite(webAccuracy) &&
+    webAccuracy + 80 < nativeAccuracy
+  ) {
+    return webLocation;
+  }
+
+  return nativeLocation;
+}
+
 export default function LocationPage() {
   const { code } = useLocalSearchParams<{ code?: string }>();
   const spaceCode = typeof code === "string" ? code : "";
@@ -246,13 +727,37 @@ export default function LocationPage() {
   const [markersById, setMarkersById] = useState<Record<string, MemberMarker>>(
     {},
   );
+  const [locationNotice, setLocationNotice] = useState("");
+  const [socketRetryTick, setSocketRetryTick] = useState(0);
+
   const baiduMapAk = process.env.EXPO_PUBLIC_BAIDU_MAP_AK?.trim() || "";
   const baiduMapOrigin =
     process.env.EXPO_PUBLIC_BAIDU_MAP_WEB_ORIGIN?.trim() ||
     "https://travel-map.local";
 
   const wsRef = useRef<WebSocket | null>(null);
+  const mapWebViewRef = useRef<WebView | null>(null);
   const promptShownRef = useRef(false);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const webLocationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const webLocationResolveRef = useRef<
+    ((value: ResolvedLocation) => void) | null
+  >(null);
+  const webLocationRejectRef = useRef<((reason?: unknown) => void) | null>(
+    null,
+  );
+  const mapReadyRef = useRef(false);
+  const latestWebLocationRef = useRef<ResolvedLocation | null>(null);
+  const latestWebLocationAtRef = useRef(0);
+  const webLocationRequestStartedAtRef = useRef(0);
+  const webLocationPromiseRef = useRef<Promise<ResolvedLocation> | null>(null);
+  const latestPublishedLocationRef = useRef<PublishedLocationCache | null>(
+    null,
+  );
+  const latestMarkersRef = useRef<MemberMarker[]>([]);
+  const networkProviderSupportedRef = useRef(true);
 
   useFocusEffect(
     useCallback(() => {
@@ -271,18 +776,54 @@ export default function LocationPage() {
   );
 
   const memberMap = useMemo(() => {
-    const map = new Map<string, string>();
+    const result = new Map<string, string>();
     for (const user of space?.users ?? []) {
-      map.set(user.id, user.nickname || "成员");
+      result.set(user.id, user.nickname || "成员");
     }
     if (currentProfile) {
-      map.set(currentProfile.id, currentProfile.nickname || "我");
+      result.set(currentProfile.id, currentProfile.nickname || "我");
     }
-    return map;
+    return result;
   }, [currentProfile, space?.users]);
 
+  const clearReconnectTimer = useCallback(() => {
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  }, []);
+
+  const clearPendingWebLocationRequest = useCallback(() => {
+    if (webLocationTimeoutRef.current) {
+      clearTimeout(webLocationTimeoutRef.current);
+      webLocationTimeoutRef.current = null;
+    }
+    webLocationResolveRef.current = null;
+    webLocationRejectRef.current = null;
+  }, []);
+
+  const scheduleReconnect = useCallback(() => {
+    if (reconnectTimerRef.current) {
+      return;
+    }
+
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectTimerRef.current = null;
+      setSocketRetryTick((value) => value + 1);
+    }, 2200);
+  }, []);
+
+  const sendSocketPayload = useCallback((payload: object) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(payload));
+    }
+  }, []);
+
   const syncOwnLocationToState = useCallback(
-    (coords: Location.LocationObjectCoords) => {
+    (
+      coords: Location.LocationObjectCoords,
+      coordinateSystem: CoordinateSystem,
+    ) => {
       if (!currentProfile) {
         return;
       }
@@ -294,6 +835,7 @@ export default function LocationPage() {
           name: currentProfile.nickname || "我",
           latitude: coords.latitude,
           longitude: coords.longitude,
+          coordinateSystem,
           isCurrentUser: true,
           updatedAt: Date.now(),
         },
@@ -302,40 +844,359 @@ export default function LocationPage() {
     [currentProfile],
   );
 
-  const sendSocketPayload = useCallback((payload: object) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(payload));
-    }
-  }, []);
-
-  const publishCurrentLocation = useCallback(async () => {
-    if (!currentProfile) {
+  const syncMarkersToWebView = useCallback((markers: MemberMarker[]) => {
+    latestMarkersRef.current = markers;
+    if (!mapReadyRef.current || !mapWebViewRef.current) {
       return;
     }
-    const position = await Location.getCurrentPositionAsync({
-      accuracy: Location.Accuracy.Balanced,
+
+    const payload: WebViewOutboundPayload = {
+      type: "sync_markers",
+      markers: markers.map((marker) => ({
+        id: marker.id,
+        name: marker.name,
+        latitude: marker.latitude,
+        longitude: marker.longitude,
+        coordinateSystem: marker.coordinateSystem,
+        isCurrentUser: marker.isCurrentUser,
+      })),
+    };
+    mapWebViewRef.current.postMessage(JSON.stringify(payload));
+  }, []);
+
+  const getReusablePublishedLocation = useCallback((maxAgeMs: number) => {
+    const cachedLocation = latestPublishedLocationRef.current;
+    if (!cachedLocation) {
+      return null;
+    }
+
+    if (Date.now() - cachedLocation.resolvedAt > maxAgeMs) {
+      return null;
+    }
+
+    return cachedLocation.result;
+  }, []);
+
+  const requestWebViewLocation = useCallback(
+    async (preferFresh: boolean): Promise<ResolvedLocation> => {
+      const now = Date.now();
+      const latestWebLocation = latestWebLocationRef.current;
+
+      if (latestWebLocation) {
+        const webLocationAge = now - latestWebLocationAtRef.current;
+        if (!preferFresh && webLocationAge < WEB_LOCATION_REUSE_MS) {
+          return latestWebLocation;
+        }
+        if (webLocationAge < WEB_LOCATION_COOLDOWN_MS) {
+          return latestWebLocation;
+        }
+      }
+
+      if (webLocationPromiseRef.current) {
+        return webLocationPromiseRef.current;
+      }
+
+      if (
+        now - webLocationRequestStartedAtRef.current <
+        WEB_LOCATION_COOLDOWN_MS
+      ) {
+        const cachedPublishedLocation = getReusablePublishedLocation(
+          WEB_LOCATION_REUSE_MS,
+        );
+        if (cachedPublishedLocation) {
+          return cachedPublishedLocation;
+        }
+      }
+
+      const waitUntilReady = async () => {
+        if (mapReadyRef.current) {
+          return;
+        }
+
+        await new Promise<void>((resolve, reject) => {
+          const startedAt = Date.now();
+          const timer = setInterval(() => {
+            if (mapReadyRef.current) {
+              clearInterval(timer);
+              resolve();
+              return;
+            }
+
+            if (Date.now() - startedAt > 5000) {
+              clearInterval(timer);
+              reject(new Error("地图尚未准备好，暂时无法使用兼容定位。"));
+            }
+          }, 180);
+        });
+      };
+
+      await waitUntilReady();
+      clearPendingWebLocationRequest();
+
+      if (!mapWebViewRef.current) {
+        throw new Error("地图组件尚未加载完成。");
+      }
+
+      webLocationRequestStartedAtRef.current = Date.now();
+
+      const requestPromise = new Promise<ResolvedLocation>(
+        (resolve, reject) => {
+          webLocationResolveRef.current = resolve;
+          webLocationRejectRef.current = reject;
+          webLocationTimeoutRef.current = setTimeout(() => {
+            clearPendingWebLocationRequest();
+            reject(
+              new Error(
+                "兼容定位超时，请确认设备的定位服务与网络连接都已开启。",
+              ),
+            );
+          }, 12000);
+
+          const payload: WebViewOutboundPayload = {
+            type: "request_web_location",
+          };
+          mapWebViewRef.current?.postMessage(JSON.stringify(payload));
+        },
+      );
+
+      webLocationPromiseRef.current = requestPromise.finally(() => {
+        if (webLocationPromiseRef.current === requestPromise) {
+          webLocationPromiseRef.current = null;
+        }
+      });
+
+      return webLocationPromiseRef.current;
+    },
+    [clearPendingWebLocationRequest, getReusablePublishedLocation],
+  );
+
+  const broadcastResolvedLocation = useCallback(
+    (
+      result: ResolvedLocation,
+      options?: {
+        updateNotice?: boolean;
+        resolvedAt?: number;
+      },
+    ) => {
+      if (!currentProfile) {
+        return;
+      }
+
+      latestPublishedLocationRef.current = {
+        result,
+        resolvedAt: options?.resolvedAt ?? Date.now(),
+        lastBroadcastAt: Date.now(),
+      };
+      syncOwnLocationToState(result.coords, result.coordinateSystem);
+
+      if (options?.updateNotice !== false) {
+        if (result.source === "webview_browser") {
+          setLocationNotice(
+            "当前设备正在使用浏览器兼容定位，首次授权后后续刷新不会反复弹出定位确认。",
+          );
+        } else if (result.source === "webview_baidu") {
+          setLocationNotice(
+            "当前设备正在使用百度兼容定位，定位精度会受到网络环境和地图服务影响。",
+          );
+        } else if (result.usedLastKnown) {
+          setLocationNotice("当前使用的是最近一次可用定位，精度可能略低。");
+        } else {
+          setLocationNotice("");
+        }
+      }
+
+      sendSocketPayload({
+        type: "location",
+        latitude: result.coords.latitude,
+        longitude: result.coords.longitude,
+        accuracy: result.coords.accuracy,
+        coordinate_system: result.coordinateSystem,
+        nickname: currentProfile.nickname,
+        sent_at: Date.now(),
+      } satisfies SocketLocationPayload);
+    },
+    [currentProfile, sendSocketPayload, syncOwnLocationToState],
+  );
+
+  const handleMapMessage = useCallback(
+    (event: WebViewMessageEvent) => {
+      const payload = parseWebViewMessage(event.nativeEvent.data);
+      if (!payload) {
+        return;
+      }
+
+      if (payload.type === "map_ready") {
+        mapReadyRef.current = true;
+        syncMarkersToWebView(latestMarkersRef.current);
+        return;
+      }
+
+      if (payload.type === "web_location") {
+        const resolved: ResolvedLocation = {
+          coords: buildCoords(
+            payload.latitude,
+            payload.longitude,
+            payload.accuracy,
+          ),
+          usedLastKnown: false,
+          source:
+            payload.coordinate_system === "bd09"
+              ? "webview_baidu"
+              : "webview_browser",
+          coordinateSystem:
+            payload.coordinate_system === "bd09" ? "bd09" : "gps",
+        };
+        latestWebLocationRef.current = resolved;
+        latestWebLocationAtRef.current = Date.now();
+
+        const resolve = webLocationResolveRef.current;
+        clearPendingWebLocationRequest();
+        resolve?.(resolved);
+        return;
+      }
+
+      const reject = webLocationRejectRef.current;
+      clearPendingWebLocationRequest();
+      reject?.(new Error(payload.message || "兼容定位失败。"));
+    },
+    [clearPendingWebLocationRequest, syncMarkersToWebView],
+  );
+
+  const resolveCurrentLocation = useCallback(
+    async (preferFresh: boolean): Promise<ResolvedLocation> => {
+      if (Platform.OS === "android" && networkProviderSupportedRef.current) {
+        await Location.enableNetworkProviderAsync().catch(() => {
+          networkProviderSupportedRef.current = false;
+        });
+      }
+
+      const servicesEnabled = await Location.hasServicesEnabledAsync();
+      if (!servicesEnabled) {
+        throw new Error("Location services are disabled.");
+      }
+
+      try {
+        const nativeLocation = await Location.getCurrentPositionAsync({
+          accuracy:
+            Platform.OS === "ios"
+              ? Location.Accuracy.BestForNavigation
+              : preferFresh
+                ? Location.Accuracy.Highest
+                : Location.Accuracy.High,
+        });
+
+        const resolvedNative: ResolvedLocation = {
+          coords: nativeLocation.coords,
+          usedLastKnown: false,
+          source: "native",
+          coordinateSystem: "gps",
+        };
+
+        if (getAccuracyValue(nativeLocation.coords.accuracy) <= 120) {
+          return resolvedNative;
+        }
+
+        const webLocation = await requestWebViewLocation(preferFresh).catch(
+          () => null,
+        );
+        return chooseBetterLocation(resolvedNative, webLocation);
+      } catch (error) {
+        const webLocation = await requestWebViewLocation(preferFresh).catch(
+          () => null,
+        );
+        if (webLocation) {
+          return webLocation;
+        }
+
+        if (
+          Platform.OS === "android" &&
+          isUnsupportedAndroidLocationError(error)
+        ) {
+          throw new Error(
+            "当前设备的系统定位组件不可用，兼容定位也没有成功。请确认定位权限、网络连接和 WebView 权限都已开启后再试。",
+          );
+        }
+
+        const lastKnown = await Location.getLastKnownPositionAsync({
+          maxAge: 10 * 60 * 1000,
+          requiredAccuracy: 500,
+        }).catch(() => null);
+
+        if (lastKnown?.coords) {
+          return {
+            coords: lastKnown.coords,
+            usedLastKnown: true,
+            source: "last_known",
+            coordinateSystem: "gps",
+          };
+        }
+
+        throw error;
+      }
+    },
+    [requestWebViewLocation],
+  );
+
+  const publishCurrentLocation = useCallback(
+    async (preferFresh: boolean) => {
+      if (!currentProfile) {
+        return null;
+      }
+
+      const result = await resolveCurrentLocation(preferFresh);
+      broadcastResolvedLocation(result);
+      return result;
+      /*
+
+      if (result.source === "webview_browser") {
+        setLocationNotice(
+          "当前设备正在使用浏览器兼容定位，授权一次后后续刷新不会反复弹出定位确认。",
+        );
+      } else if (result.source === "webview_baidu") {
+        setLocationNotice(
+          "当前设备正在使用百度兼容定位，定位精度会受到网络环境和地图服务影响。",
+        );
+      } else if (result.usedLastKnown) {
+        setLocationNotice("当前使用的是最近一次可用定位，精度可能略低。");
+      } else {
+        setLocationNotice("");
+      }
+
+      sendSocketPayload({
+        type: "location",
+        latitude: result.coords.latitude,
+        longitude: result.coords.longitude,
+        accuracy: result.coords.accuracy,
+        coordinate_system: result.coordinateSystem,
+        nickname: currentProfile.nickname,
+        sent_at: Date.now(),
+      } satisfies SocketLocationPayload);
+      */
+    },
+    [broadcastResolvedLocation, currentProfile, resolveCurrentLocation],
+  );
+
+  const handleLocationFailure = useCallback((error: unknown) => {
+    setLocationNotice(getFriendlyLocationErrorMessage(error));
+  }, []);
+
+  const openSystemSettings = useCallback(() => {
+    void Linking.openSettings().catch(() => {
+      Alert.alert("打开设置失败", "请手动到系统设置中开启定位服务或定位权限。");
     });
-    syncOwnLocationToState(position.coords);
-    sendSocketPayload({
-      type: "location",
-      latitude: position.coords.latitude,
-      longitude: position.coords.longitude,
-      accuracy: position.coords.accuracy,
-      nickname: currentProfile.nickname,
-      sent_at: Date.now(),
-    } satisfies SocketLocationPayload);
-  }, [currentProfile, sendSocketPayload, syncOwnLocationToState]);
+  }, []);
 
   const requestPermissionFlow = useCallback(() => {
     if (promptShownRef.current) {
       return;
     }
+
     promptShownRef.current = true;
     setPermissionState("prompting");
 
     Alert.alert(
       "启用定位服务",
-      "位置共享需要获取你的当前坐标，并通过 WebSocket 接收其他成员位置。你是否同意开启定位服务？",
+      "位置共享需要获取你当前的坐标，并通过 WebSocket 接收其他成员位置。你是否同意开启定位服务？",
       [
         {
           text: "暂不同意",
@@ -361,6 +1222,13 @@ export default function LocationPage() {
       ],
     );
   }, []);
+
+  useEffect(() => {
+    return () => {
+      clearReconnectTimer();
+      clearPendingWebLocationRequest();
+    };
+  }, [clearPendingWebLocationRequest, clearReconnectTimer]);
 
   useEffect(() => {
     if (!space || !currentProfile) {
@@ -396,10 +1264,22 @@ export default function LocationPage() {
       if (cancelled) {
         return;
       }
+
+      clearReconnectTimer();
       setSocketState("connected");
-      void publishCurrentLocation().catch(() => {
-        setSocketState("error");
-      });
+      const reusableLocation = getReusablePublishedLocation(
+        PUBLISHED_LOCATION_REUSE_MS,
+      );
+      const cachedPublishedLocation = latestPublishedLocationRef.current;
+      if (reusableLocation) {
+        broadcastResolvedLocation(reusableLocation, {
+          updateNotice: false,
+          resolvedAt: cachedPublishedLocation?.resolvedAt,
+        });
+      }
+      if (!getReusablePublishedLocation(PUBLISHED_LOCATION_REFRESH_GRACE_MS)) {
+        void publishCurrentLocation(false).catch(handleLocationFailure);
+      }
       sendSocketPayload({
         type: "request_location",
       } satisfies SocketRequestPayload);
@@ -412,17 +1292,45 @@ export default function LocationPage() {
 
       let envelope: WsEnvelope | null = null;
       try {
-        envelope = JSON.parse(event.data as string) as WsEnvelope;
+        envelope = JSON.parse(String(event.data)) as WsEnvelope;
       } catch {
         envelope = null;
       }
+
       if (!envelope?.message) {
         return;
       }
 
       if (isLocationRequestMessage(envelope.message)) {
-        void publishCurrentLocation().catch(() => {
-          setSocketState("error");
+        const reusableLocation = getReusablePublishedLocation(
+          PUBLISHED_LOCATION_REUSE_MS,
+        );
+        const cachedPublishedLocation = latestPublishedLocationRef.current;
+        if (reusableLocation) {
+          broadcastResolvedLocation(reusableLocation, {
+            updateNotice: false,
+            resolvedAt: cachedPublishedLocation?.resolvedAt,
+          });
+          if (
+            getReusablePublishedLocation(PUBLISHED_LOCATION_REFRESH_GRACE_MS)
+          ) {
+            return;
+          }
+        }
+        void publishCurrentLocation(false).catch(handleLocationFailure);
+        return;
+      }
+
+      const offlinePayload = parseMemberOfflineMessage(envelope.message);
+      if (offlinePayload) {
+        setMarkersById((prev) => {
+          if (!prev[offlinePayload.user_id]) {
+            return prev;
+          }
+
+          const next = { ...prev };
+          delete next[offlinePayload.user_id];
+          return next;
         });
         return;
       }
@@ -432,47 +1340,73 @@ export default function LocationPage() {
         return;
       }
 
+      const senderId = envelope.sender_id;
+      if (senderId === currentProfile.id) {
+        return;
+      }
       const memberName =
-        payload.nickname?.trim() || memberMap.get(envelope.sender_id) || "成员";
+        payload.nickname?.trim() || memberMap.get(senderId) || "成员";
 
-      setMarkersById((prev) => ({
-        ...prev,
-        [envelope.sender_id as string]: {
-          id: envelope.sender_id as string,
-          name: memberName,
-          latitude: payload.latitude,
-          longitude: payload.longitude,
-          isCurrentUser: envelope.sender_id === currentProfile.id,
-          updatedAt: envelope.timestamp ?? payload.sent_at ?? Date.now(),
-        },
-      }));
+      const nextUpdatedAt = envelope.timestamp ?? payload.sent_at ?? Date.now();
+
+      setMarkersById((prev) => {
+        const existingMarker = prev[senderId];
+        if (existingMarker && nextUpdatedAt <= existingMarker.updatedAt) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+          [senderId]: {
+            id: senderId,
+            name: memberName,
+            latitude: payload.latitude,
+            longitude: payload.longitude,
+            coordinateSystem:
+              payload.coordinate_system === "bd09" ? "bd09" : "gps",
+            isCurrentUser: false,
+            updatedAt: nextUpdatedAt,
+          },
+        };
+      });
     };
 
     socket.onerror = () => {
       if (!cancelled) {
         setSocketState("error");
+        setLocationNotice(
+          (prev) => prev || "位置通道连接异常，系统会稍后自动重连。",
+        );
       }
     };
 
     socket.onclose = () => {
       if (!cancelled) {
         setSocketState("idle");
+        scheduleReconnect();
       }
     };
 
     return () => {
       cancelled = true;
+      clearReconnectTimer();
       if (wsRef.current === socket) {
         wsRef.current = null;
       }
       socket.close();
     };
   }, [
+    broadcastResolvedLocation,
+    clearReconnectTimer,
     currentProfile,
+    getReusablePublishedLocation,
+    handleLocationFailure,
     memberMap,
     permissionState,
     publishCurrentLocation,
+    scheduleReconnect,
     sendSocketPayload,
+    socketRetryTick,
     space,
   ]);
 
@@ -490,7 +1424,11 @@ export default function LocationPage() {
     [markersById],
   );
 
-  const onRefreshLocations = () => {
+  useEffect(() => {
+    syncMarkersToWebView(markers);
+  }, [markers, syncMarkersToWebView]);
+
+  const onRefreshLocations = useCallback(() => {
     if (permissionState !== "granted") {
       requestPermissionFlow();
       return;
@@ -498,21 +1436,58 @@ export default function LocationPage() {
 
     void (async () => {
       try {
-        await publishCurrentLocation();
+        const reusableLocation = getReusablePublishedLocation(
+          PUBLISHED_LOCATION_REFRESH_GRACE_MS,
+        );
+        if (reusableLocation) {
+          broadcastResolvedLocation(reusableLocation, {
+            updateNotice: false,
+          });
+        } else {
+          await publishCurrentLocation(true);
+        }
+        if (wsRef.current?.readyState !== WebSocket.OPEN) {
+          setSocketState("connecting");
+          setSocketRetryTick((value) => value + 1);
+          setLocationNotice("位置通道正在重连，稍后会继续同步其他成员位置。");
+          return;
+        }
+
         sendSocketPayload({
           type: "request_location",
         } satisfies SocketRequestPayload);
       } catch (error) {
-        Alert.alert("刷新失败", String(error));
+        const friendlyMessage = getFriendlyLocationErrorMessage(error);
+        setLocationNotice(friendlyMessage);
+        Alert.alert(
+          "刷新失败",
+          friendlyMessage,
+          shouldSuggestOpeningSettings(friendlyMessage)
+            ? [
+                { text: "取消", style: "cancel" },
+                { text: "打开设置", onPress: openSystemSettings },
+              ]
+            : [{ text: "知道了", style: "default" }],
+        );
       }
     })();
-  };
+  }, [
+    broadcastResolvedLocation,
+    getReusablePublishedLocation,
+    openSystemSettings,
+    permissionState,
+    publishCurrentLocation,
+    requestPermissionFlow,
+    sendSocketPayload,
+  ]);
+
+  const mapHtml = useMemo(() => buildMapHtml(baiduMapAk), [baiduMapAk]);
 
   if (!space) {
     return (
-      <SafeAreaView style={styles.safeArea}>
+      <SafeAreaView style={styles.safeArea} edges={["top"]}>
         <View style={styles.emptyContainer}>
-          <Text style={styles.emptyTitle}>位置共享暂不可用</Text>
+          <Text style={styles.emptyTitle}>位置共享暂时不可用</Text>
           <Pressable
             style={styles.backButton}
             onPress={() => router.replace("/")}
@@ -524,19 +1499,12 @@ export default function LocationPage() {
     );
   }
 
-  const mapHtml = buildMapHtml(markers, baiduMapAk);
-
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={["top"]}>
       <View style={styles.container}>
         <View style={styles.header}>
           <View style={styles.headerTextWrap}>
             <Text style={styles.title}>位置共享</Text>
-            <Text style={styles.subtitle}>
-              {permissionState === "granted"
-                ? "进入页面后会连接 WebSocket，同步成员当前位置。"
-                : "同意定位服务后，才能使用空间位置共享。"}
-            </Text>
           </View>
           <Pressable
             style={styles.backButton}
@@ -552,15 +1520,15 @@ export default function LocationPage() {
           <View style={styles.permissionCard}>
             <Text style={styles.permissionTitle}>缺少百度地图 AK</Text>
             <Text style={styles.permissionText}>
-              请先在 local/.env 中配置
-              EXPO_PUBLIC_BAIDU_MAP_AK，然后重新启动应用。
+              请先在 `local/.env` 中配置
+              `EXPO_PUBLIC_BAIDU_MAP_AK`，然后重启应用。
             </Text>
           </View>
         ) : permissionState === "denied" ? (
           <View style={styles.permissionCard}>
-            <Text style={styles.permissionTitle}>未开启定位权限</Text>
+            <Text style={styles.permissionTitle}>还没有开启定位权限</Text>
             <Text style={styles.permissionText}>
-              你没有同意定位服务，因此当前位置和其他成员位置都无法显示。
+              你还没有同意定位服务，因此无法共享自己的位置，也无法进入位置共享页。
             </Text>
             <Pressable
               style={styles.primaryButton}
@@ -576,12 +1544,16 @@ export default function LocationPage() {
           <>
             <View style={styles.mapCard}>
               <WebView
+                ref={mapWebViewRef}
                 originWhitelist={["*"]}
                 source={{ html: mapHtml, baseUrl: baiduMapOrigin }}
                 style={styles.webview}
                 javaScriptEnabled
                 domStorageEnabled
+                cacheEnabled
+                geolocationEnabled
                 scrollEnabled={false}
+                onMessage={handleMapMessage}
               />
             </View>
 
@@ -589,14 +1561,15 @@ export default function LocationPage() {
               <View style={styles.statusWrap}>
                 <Text style={styles.statusLabel}>连接状态</Text>
                 <Text style={styles.statusText}>
-                  {socketState === "connected"
-                    ? "已连接"
-                    : socketState === "connecting"
-                      ? "连接中"
-                      : socketState === "error"
-                        ? "连接失败"
-                        : "未连接"}
+                  {getSocketStatusLabel(socketState)}
                 </Text>
+                {locationNotice ? (
+                  <Text style={styles.statusHelperText}>{locationNotice}</Text>
+                ) : (
+                  <Text style={styles.statusHelperText}>
+                    刷新位置会重新广播自己的坐标，并请求其他成员回传位置。
+                  </Text>
+                )}
               </View>
               <Pressable
                 style={styles.primaryButton}
@@ -674,13 +1647,6 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     color: mapPalette.text,
   },
-  subtitle: {
-    marginTop: 8,
-    fontSize: 13,
-    lineHeight: 20,
-    color: mapPalette.muted,
-    maxWidth: 260,
-  },
   backButton: {
     borderRadius: 999,
     borderWidth: 1,
@@ -746,6 +1712,12 @@ const styles = StyleSheet.create({
     color: mapPalette.text,
     fontSize: 16,
     fontWeight: "800",
+  },
+  statusHelperText: {
+    marginTop: 6,
+    color: mapPalette.muted,
+    fontSize: 12,
+    lineHeight: 18,
   },
   primaryButton: {
     borderRadius: 16,

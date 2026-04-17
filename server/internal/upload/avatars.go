@@ -31,7 +31,5 @@ func SaveAvatarFromForm(c *gin.Context) (remoteURL string, httpStatus int, err e
 		return "", http.StatusInternalServerError, fmt.Errorf("保存文件失败: %w", err)
 	}
 
-	host := config.GlobalConfig.Host
-	port := config.GlobalConfig.Port
-	return fmt.Sprintf("%s:%d/avatars/%s", host, port, newFileName), http.StatusOK, nil
+	return fmt.Sprintf("%s/avatars/%s", baseURLFromRequest(c), newFileName), http.StatusOK, nil
 }

@@ -46,7 +46,8 @@
 5. 客户端 `POST sync`，
     - // TODO： 重写一下这段文档
 6. 客户端 检查photos（检查所有记录，不要按照space_id筛选，因为可能有其他空间本地照片post失败的情况）：
-    - remote_url为空，说明是你添加的图片。你需要post该photo，服务器会把remote_url填入服务器的数据库，你下次sync则会得到该remote_url。
-    - 前端需处理photo表查到photo记录，但local_uri为空的异常情况
-    - 这意味着，事实上photo只有create和delete，不会有update
-    - //TODO：添加下载照片的逻辑
+    - `remote_url` 为空，且 `${App存储目录}/photos/${photo_id}.jpg` 存在：说明这是本地新建、尚未上传二进制的图片。前端需调用 `POST /api/v1/photos` 做上传补偿；服务端写入 `remote_url` 后，客户端下次 sync 会拉到它。
+    - `remote_url` 非空，且 `${App存储目录}/photos/${photo_id}.jpg` 不存在：说明 photo 元数据已经同步到本地，但图片文件本身还没落到设备上。前端应在 sync 完成后把图片下载到这个固定路径，供后续显示与离线访问。
+    - `remote_url` 非空，且 `${App存储目录}/photos/${photo_id}.jpg` 已存在：说明这条 photo 已经是完整状态，不需要额外处理。
+    - `remote_url` 为空，且 `${App存储目录}/photos/${photo_id}.jpg` 也不存在：说明这是异常记录。客户端无法自动恢复，应在 sync 中跳过且不影响整体成功；前端展示时不显示这张图片。
+    - 这意味着，事实上 photo 的同步补偿只围绕“上传缺失的二进制”和“下载缺失的二进制”展开，不存在单独的 photo update 文件同步逻辑。

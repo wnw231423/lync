@@ -3,7 +3,7 @@ import { appSchema, tableSchema } from "@nozbe/watermelondb";
 // schema 定义了 docs/data-design.md 中约定的本地离线数据表结构。
 export default appSchema({
   // version 要与 migrations 的最新版本保持一致。
-  version: 6,
+  version: 7,
   tables: [
     tableSchema({
       // users 只保留文档要求的用户主键与昵称；头像改由前端本地文件管理。
@@ -46,12 +46,11 @@ export default appSchema({
       ],
     }),
     tableSchema({
-      // photos 保留本地图片路径，方便前端离线显示与后续上传远程地址。
+      // photos 只保留同步元数据；本地文件路径统一由 photo_id 推导。
       name: "photos",
       columns: [
         { name: "space_id", type: "string", isIndexed: true },
         { name: "uploader_id", type: "string" },
-        { name: "local_uri", type: "string", isOptional: true },
         { name: "remote_url", type: "string", isOptional: true },
         { name: "post_id", type: "string", isIndexed: true },
         { name: "shoted_at", type: "number" },

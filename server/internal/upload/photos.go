@@ -34,9 +34,7 @@ func SavePhotoFromForm(c *gin.Context) (remoteURL string, httpStatus int, err er
 		return "", http.StatusInternalServerError, fmt.Errorf("保存文件到服务器失败: %w", err)
 	}
 
-	host := config.GlobalConfig.Host
-	port := config.GlobalConfig.Port
-	fileURL := fmt.Sprintf("%s:%d/photos/%s", host, port, newFileName)
+	fileURL := fmt.Sprintf("%s/photos/%s", baseURLFromRequest(c), newFileName)
 
 	photoID := c.PostForm("photo_id")
 	spaceID := c.PostForm("space_id")

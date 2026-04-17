@@ -1,6 +1,10 @@
-import { File, Paths } from "expo-file-system";
 import { synchronize } from "@nozbe/watermelondb/sync";
 
+import {
+  getExistingPhotoLocalUri,
+  getPhotoLocalFile,
+  savePhotoToLocalStorage,
+} from "@/lib/photoAssets";
 import { database } from "@/model";
 import Photo from "@/model/Photo";
 import { META_TABLES, SYNC_TABLES, type SyncTableName } from "@/model/tables";
@@ -60,8 +64,10 @@ export async function syncSpace(input: SyncContext): Promise<void> {
  * - `pullChanges` is scoped by the current `spaceId`
  * - `pushChanges` sends global changes because WatermelonDB generates them
  *   globally instead of filtering by `space_id`
- * - after the database sync finishes, we run a second phase for photo file
- *   uploads because `/api/v1/photos` is separate from `/api/v1/sync`
+ * - after the database sync finishes, we run photo file compensation in two
+ *   directions:
+ *   - upload local-only photos that still have no `remote_url`
+ *   - download remote-only photos into app sandbox storage
  */
 async function runSync(context: SyncContext): Promise<void> {
   const apiBaseUrl = getApiBaseUrl();
@@ -130,13 +136,15 @@ async function runSync(context: SyncContext): Promise<void> {
     migrationsEnabledAtVersion: 1,
   });
 
-  // Photo file upload is intentionally separated from WatermelonDB's record
-  // sync:
+  // Photo file compensation is intentionally separated from WatermelonDB's
+  // record sync:
   // - `/api/v1/sync` handles database rows
-  // - `/api/v1/photos` handles the actual file binary
+  // - `/api/v1/photos` handles upload binary
+  // - remote image download into app sandbox is a client-side storage concern
   //
-  // We run it after the main sync so record creation reaches the server first.
+  // We run these after the main sync so record metadata is settled first.
   await uploadPendingPhotos(apiBaseUrl, context.userId);
+  await downloadRemotePhotos();
 }
 
 /**
@@ -226,6 +234,25 @@ async function uploadPendingPhotos(
 }
 
 /**
+ * Downloads remote photos that are already known by the database but do not
+ * yet exist in local sandbox storage.
+ *
+ * Why this is a separate pass:
+ * - Pull only gives us metadata such as `remote_url`
+ * - offline rendering still needs a real file in app storage
+ * - local file existence is determined only by the canonical photo path derived
+ *   from `photo_id`, not by any database field
+ */
+async function downloadRemotePhotos(): Promise<void> {
+  const photosCollection = database.collections.get<Photo>("photos");
+  const allPhotos = await photosCollection.query().fetch();
+
+  for (const photo of allPhotos) {
+    await downloadSinglePhoto(photo);
+  }
+}
+
+/**
  * Decides whether a photo still needs binary upload compensation.
  *
  * The backend fills `remote_url` after `/api/v1/photos` succeeds. Until a
@@ -237,10 +264,38 @@ function hasPendingPhotoUpload(photo: Photo): boolean {
 }
 
 /**
+ * Downloads one remote photo into app storage when the local file is missing.
+ *
+ * The target path follows `data-design.md`:
+ * `${App storage}/photos/${photo_id}.jpg`
+ *
+ * If both `remote_url` and the canonical local file are missing, this photo is
+ * considered an abnormal local record and is skipped. The UI layer is expected
+ * to hide that broken image entry instead of failing the whole sync round.
+ */
+async function downloadSinglePhoto(photo: Photo): Promise<void> {
+  const remoteUrl = normalizeOptionalString(photo.remoteUrl);
+  if (!remoteUrl) {
+    return;
+  }
+
+  if (getExistingPhotoLocalUri(photo.id)) {
+    return;
+  }
+
+  const downloadedLocalUri = await savePhotoToLocalStorage(photo.id, remoteUrl);
+  if (!downloadedLocalUri) {
+    console.warn(
+      `[sync] skip photo download for ${photo.id}: could not materialize local file from ${remoteUrl}`,
+    );
+  }
+}
+
+/**
  * Uploads one photo file to `POST /api/v1/photos`.
  *
  * We derive the expected local path from `data-design.md` rather than storing
- * `local_uri` in the database:
+ * any local path in the database:
  * `${App storage}/photos/${photo_id}.jpg`
  *
  * If the database row exists but the file is missing, we do not fail the whole
@@ -252,7 +307,7 @@ async function uploadSinglePhoto(
   userId: string,
   photo: Photo,
 ): Promise<void> {
-  const localPhotoFile = getExpectedLocalPhotoFile(photo.id);
+  const localPhotoFile = getPhotoLocalFile(photo.id);
   if (!localPhotoFile.exists) {
     console.warn(
       `[sync] skip photo upload for ${photo.id}: local file missing at ${localPhotoFile.uri}`,
@@ -294,16 +349,6 @@ async function uploadSinglePhoto(
   // that field and the client receives it on the next pull. This avoids
   // manufacturing an extra local "photo updated" change just because the file
   // upload API echoed the server URL back to us.
-}
-
-/**
- * Resolves the canonical local file location for a photo id.
- *
- * Keeping this path logic in one helper makes it easier to update later if the
- * project changes its on-device storage layout.
- */
-function getExpectedLocalPhotoFile(photoId: string): File {
-  return new File(Paths.document, "photos", `${photoId}.jpg`);
 }
 
 /**
@@ -425,6 +470,10 @@ function isSyncRecord(value: unknown): value is SyncRecord {
  */
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function normalizeOptionalString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 /**

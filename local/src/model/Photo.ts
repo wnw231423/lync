@@ -5,6 +5,9 @@ import { date, readonly, text } from "@nozbe/watermelondb/decorators";
 export default class Photo extends Model {
   static table = "photos";
 
+  // 注意：photo 的本地文件路径不落库。
+  // 前端统一通过 `${App存储目录}/photos/${photo_id}.jpg` 推导本地文件位置。
+
   // spaceId 指向这张图片所属的旅行空间。
   // @ts-ignore
   @text("space_id") spaceId;
@@ -16,10 +19,6 @@ export default class Photo extends Model {
   // uploaderId 记录是哪位成员上传了这张图片。
   // @ts-ignore
   @text("uploader_id") uploaderId;
-
-  // localUri 保存离线展示时使用的本地沙盒文件路径。
-  // @ts-ignore
-  @text("local_uri") localUri;
 
   // remoteUrl 在存在网络来源时保存原始图片地址。
   // @ts-ignore

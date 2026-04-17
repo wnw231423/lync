@@ -463,5 +463,53 @@ export default schemaMigrations({
         `),
       ],
     },
+    {
+      // v7 移除 photos.local_uri，统一改为由 photo_id 推导本地文件路径。
+      toVersion: 7,
+      steps: [
+        unsafeExecuteSql(`
+          create table if not exists "photos_v7" (
+            "id" text primary key not null,
+            "_changed" text not null,
+            "_status" text not null,
+            "space_id" text not null,
+            "uploader_id" text not null,
+            "remote_url" text,
+            "post_id" text not null,
+            "shoted_at" integer not null,
+            "created_at" integer not null,
+            "updated_at" integer not null
+          );
+          insert or replace into "photos_v7" (
+            "id",
+            "_changed",
+            "_status",
+            "space_id",
+            "uploader_id",
+            "remote_url",
+            "post_id",
+            "shoted_at",
+            "created_at",
+            "updated_at"
+          )
+          select
+            "id",
+            coalesce("_changed", ''),
+            coalesce("_status", 'synced'),
+            coalesce("space_id", ''),
+            coalesce("uploader_id", ''),
+            nullif(coalesce("remote_url", ''), ''),
+            coalesce("post_id", ''),
+            coalesce("shoted_at", coalesce("created_at", strftime('%s','now') * 1000)),
+            coalesce("created_at", strftime('%s','now') * 1000),
+            coalesce("updated_at", coalesce("created_at", strftime('%s','now') * 1000))
+          from "photos";
+          drop table "photos";
+          alter table "photos_v7" rename to "photos";
+          create index if not exists "photos_space_id_index" on "photos" ("space_id");
+          create index if not exists "photos_post_id_index" on "photos" ("post_id");
+        `),
+      ],
+    },
   ],
 });

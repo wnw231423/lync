@@ -6,9 +6,12 @@
 
 1. 软删除，根据[官方文档](https://watermelondb.dev/docs/CRUD#delete-a-record)，由于涉及同步，需要调用`await somePost.markAsDeleted()`实现软删除。
 2. `synchronize()`函数，这个函数中有两个*callback*函数，`pullChanges`和`pushChanges`，前端可以：
-   1. 实现*callback*函数中调用API的逻辑
-   2. 定义一个`MyFunc()`，调用实现了*callback*的`synchronize()`函数。然后在需要的场景，例如按了一个按钮后，触发`MyFunc()`
+    1. 实现*callback*函数中调用API的逻辑
+    2. 定义一个`MyFunc()`，调用实现了*callback*的`synchronize()`函数。然后在需要的场景，例如按了一个按钮后，触发`MyFunc()`
 3. API规范
+4. 实现*callback*函数中调用API的逻辑
+5. 定义一个`MyFunc()`，调用实现了*callback*的`synchronize()`函数。然后在需要的场景，例如按了一个按钮后，触发`MyFunc()`
+6. API规范
 
 ## 需要注意什么？
 
@@ -16,37 +19,34 @@
 
 - `created_at`/`updated_at`：用户视角的数据元信息，服务器和本地数据库都有，由客户端通过watermelon的装饰器自动填入
 - `deleted_at`：
-  - 本地watermelonDB没有这个字段，因为它有软删除机制，通过其隐藏的`_status`字段标记已删除
-  - 服务器端需要有这个字段，因为服务器端是通用数据库，需要一个`deleted_at`做显式删除标记，而不能直接删除。标记删除后等客户端拉取更新，就要把该记录放到API回复中的delete里。
+    - 本地watermelonDB没有这个字段，因为它有软删除机制，通过其隐藏的`_status`字段标记已删除
+    - 服务器端需要有这个字段，因为服务器端是通用数据库，需要一个`deleted_at`做显式删除标记，而不能直接删除。标记删除后等客户端拉取更新，就要把该记录放到API回复中的delete里。
 - `last_modified`/`server_created_at`:
-  - 本地没有这个字段，只有服务器端有
-  - 这两个字段是用于辅助同步的，当客户端pull时，比对客户端调用API里传来的last_pulled_at参数
-    - server_created_at > last_pulled_at: 说明对客户端来说是新建的，塞到API回复的created中
-    - last_modified > last_pulled_at: 说明对客户端来说是修改过的，塞到API回复的updated中
-  - 需要区分`created_at`/`updated_at`
+    - 本地没有这个字段，只有服务器端有
+    - 这两个字段是用于辅助同步的，当客户端pull时，比对客户端调用API里传来的last_pulled_at参数
+        - server_created_at > last_pulled_at: 说明对客户端来说是新建的，塞到API回复的created中
+        - last_modified > last_pulled_at: 说明对客户端来说是修改过的，塞到API回复的updated中
+    - 需要区分`created_at`/`updated_at`
 
 ## 同步过程
 
-假设以空间为同步单位，用户点击“同步”后，同步过程如下：
+假设以空间为同步单位，用户点击"同步"后，同步过程如下：
 
 1. 客户端 `POST spaces`，参数userid和spaceid
-2. 客户端 `GET sync`, 参数user_id, space_id, last_pulled_at. 
-  1. 服务器的处理方式如下：
+2. 客户端 `GET sync`, 参数user_id, space_id, last_pulled_at.
+3. 服务器的处理方式如下：
     1. 对于user，space, space_members表：
-      1. 先根据space_id做筛选，选出space内的user，space，space_members
-      2. 直接把筛选出来的数据塞到changes的created里
+        - 先根据space_id做筛选，选出space内的user，space，space_members
+        - 直接把筛选出来的数据塞到changes的updated里.
     2. 对于其他数据表：
-      1. 先根据space_id做筛选，选出space内的数据
-      2. 根据last_pulled_at分别往changes里塞相应的created，updated，deleted
+        - 先根据space_id做筛选，选出space内的数据
+        - 根据last_pulled_at分别往changes里塞相应的created，updated，deleted
     3. 返回此回复。注意服务器要把客户端没有的字段删去。
-  2. 客户端接收到回复，watermelonDB处理此回复
-3. 客户端 `POST sync`，
-  1. 客户端会直接对watermelon本地自动生成的changes，调用API即可。其中：
-    1. photo的remote_url可能是空的
-    2. // TODO：watermelonDB自动生成的changes不会根据空间做筛选，所以上传实际上是全局的，暂时先不管
-  2. 服务器接收到push过来的change，
-    1. // TODO
-4. 客户端 检查photos（检查所有记录，不要按照space_id筛选，因为可能有其他空间本地照片post失败的情况）：
-  1. remote_url为空，说明是你添加的图片。你需要post该photo，服务器会把remote_url填入服务器的数据库，你下次sync则会得到该remote_url。
-  4. 前端需处理photo表查到photo记录，但local_uri为空的异常情况
-  5. 这意味着，事实上photo只有create和delete，不会有update
+4. 客户端接收到回复，watermelonDB处理此回复
+5. 客户端 `POST sync`，
+    - // TODO： 重写一下这段文档
+6. 客户端 检查photos（检查所有记录，不要按照space_id筛选，因为可能有其他空间本地照片post失败的情况）：
+    - remote_url为空，说明是你添加的图片。你需要post该photo，服务器会把remote_url填入服务器的数据库，你下次sync则会得到该remote_url。
+    - 前端需处理photo表查到photo记录，但local_uri为空的异常情况
+    - 这意味着，事实上photo只有create和delete，不会有update
+    - //TODO：添加下载照片的逻辑

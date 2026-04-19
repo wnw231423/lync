@@ -1,4 +1,6 @@
-# Distributed Travel Space
+# Lync Space
+
+A **local first** space APP for recording your memories. You can also share spaces with other people using our **sync** service.
 
 ## How to start?
 
@@ -11,7 +13,7 @@ cd local
 npm install
 ```
 
-2. 如需使用服务器端的网络服务，你需要配置环境变量，确保IP地址和端口对应：
+2. 如需使用服务器端的网络服务以及一些联网便利功能，你需要配置环境变量：
 
 ```bash
 cp .env.example .env

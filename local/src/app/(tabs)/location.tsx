@@ -16,7 +16,6 @@ import {
   configureBaiduNativeLocation,
   getBaiduNativeCurrentPosition,
   isBaiduNativeLocationSupported,
-  startBaiduNativeLocationUpdates,
   type BaiduNativeLocationResult,
 } from "@/features/travel/baiduLocation";
 import {
@@ -845,7 +844,6 @@ export default function LocationPage() {
   const latestMarkersRef = useRef<MemberMarker[]>([]);
   const networkProviderSupportedRef = useRef(true);
   const baiduNativeConfiguredRef = useRef(false);
-  const baiduNativeWatchStartedRef = useRef(false);
 
   useFocusEffect(
     useCallback(() => {
@@ -991,7 +989,7 @@ export default function LocationPage() {
       }
 
       const nativePayload = await getBaiduNativeCurrentPosition({
-        timeoutMs: preferFresh ? 15000 : 12000,
+        timeoutMs: preferFresh ? 5000 : 4000,
       }).catch(() => null);
       if (!nativePayload) {
         return null;
@@ -1193,18 +1191,6 @@ export default function LocationPage() {
 
   const resolveCurrentLocation = useCallback(
     async (preferFresh: boolean): Promise<ResolvedLocation> => {
-      const baiduNativeLocation =
-        Platform.OS === "android"
-          ? await requestBaiduNativeLocation(preferFresh).catch(() => null)
-          : null;
-
-      if (
-        baiduNativeLocation &&
-        getAccuracyValue(baiduNativeLocation.coords.accuracy) <= 120
-      ) {
-        return baiduNativeLocation;
-      }
-
       if (Platform.OS === "android" && networkProviderSupportedRef.current) {
         await Location.enableNetworkProviderAsync().catch(() => {
           networkProviderSupportedRef.current = false;
@@ -1233,10 +1219,6 @@ export default function LocationPage() {
           coordinateSystem: "gps",
         };
 
-        if (baiduNativeLocation) {
-          return chooseBetterLocation(baiduNativeLocation, resolvedNative);
-        }
-
         if (getAccuracyValue(nativeLocation.coords.accuracy) <= 120) {
           return resolvedNative;
         }
@@ -1246,10 +1228,6 @@ export default function LocationPage() {
         );
         return chooseBetterLocation(resolvedNative, webLocation);
       } catch (error) {
-        if (baiduNativeLocation) {
-          return baiduNativeLocation;
-        }
-
         const webLocation = await requestWebViewLocation(preferFresh).catch(
           () => null,
         );
@@ -1278,6 +1256,14 @@ export default function LocationPage() {
             source: "last_known",
             coordinateSystem: "gps",
           };
+        }
+
+        const baiduNativeLocation =
+          Platform.OS === "android"
+            ? await requestBaiduNativeLocation(preferFresh).catch(() => null)
+            : null;
+        if (baiduNativeLocation) {
+          return baiduNativeLocation;
         }
 
         throw error;
@@ -1393,69 +1379,6 @@ export default function LocationPage() {
       requestPermissionFlow();
     })();
   }, [currentProfile, requestPermissionFlow, space]);
-
-  useEffect(() => {
-    if (
-      permissionState !== "granted" ||
-      !space ||
-      !currentProfile ||
-      Platform.OS !== "android" ||
-      baiduNativeWatchStartedRef.current
-    ) {
-      return;
-    }
-
-    let cancelled = false;
-    let stopWatching: (() => void) | null = null;
-
-    void (async () => {
-      try {
-        if (!(await ensureBaiduNativeReady())) {
-          return;
-        }
-
-        baiduNativeWatchStartedRef.current = true;
-        stopWatching = await startBaiduNativeLocationUpdates(
-          {
-            intervalMs: 3000,
-          },
-          (payload) => {
-            if (cancelled) {
-              return;
-            }
-
-            const resolved = createResolvedBaiduNativeLocation(payload);
-            broadcastResolvedLocation(resolved);
-          },
-          (error) => {
-            if (!cancelled) {
-              console.log(error);
-            }
-          },
-        );
-        if (cancelled) {
-          stopWatching?.();
-          stopWatching = null;
-        }
-      } catch (error) {
-        if (!cancelled) {
-          console.log(error);
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      baiduNativeWatchStartedRef.current = false;
-      stopWatching?.();
-    };
-  }, [
-    broadcastResolvedLocation,
-    currentProfile,
-    ensureBaiduNativeReady,
-    permissionState,
-    space,
-  ]);
 
   useEffect(() => {
     if (permissionState !== "granted" || !space || !currentProfile) {

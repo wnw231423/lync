@@ -69,7 +69,7 @@ import {
 import { styles, workspaceTheme } from "@/features/travel/spaceWorkspaceStyles";
 import { syncSpace } from "@/sync/sync";
 
-// ImagePickerModule / ClipboardModule 用懒加载方式描述原生模块接口，
+// ImagePickerModule / ClipboardModule / MediaLibraryModule 用懒加载方式描述原生模块接口，
 // 这样在 Jest 或缺少原生依赖的环境里也不会因为静态 import 直接报错。
 type ImagePickerModule = {
   launchImageLibraryAsync: (options: Record<string, unknown>) => Promise<{
@@ -80,6 +80,28 @@ type ImagePickerModule = {
 
 type ClipboardModule = {
   setStringAsync: (value: string) => Promise<boolean>;
+};
+
+type MediaLibraryModule = {
+  requestPermissionsAsync?: (
+    writeOnly?: boolean,
+    granularPermissions?: string[],
+  ) => Promise<{
+    canAskAgain?: boolean;
+    granted: boolean;
+    status?: string;
+  }>;
+  saveToLibraryAsync: (localUri: string) => Promise<void>;
+};
+
+type FileSystemModule = {
+  cacheDirectory: string | null;
+  copyAsync?: (options: { from: string; to: string }) => Promise<void>;
+  deleteAsync?: (
+    fileUri: string,
+    options?: { idempotent?: boolean },
+  ) => Promise<void>;
+  downloadAsync?: (uri: string, fileUri: string) => Promise<{ uri?: string }>;
 };
 
 type ScrollableFeedHandle = {
@@ -143,6 +165,8 @@ type ActionMenuItem = {
 
 let imagePickerModuleCache: ImagePickerModule | null | undefined;
 let clipboardModuleCache: ClipboardModule | null | undefined;
+let mediaLibraryModuleCache: MediaLibraryModule | null | undefined;
+let fileSystemModuleCache: FileSystemModule | null | undefined;
 
 function normalizeSpaceCode(code?: string) {
   return typeof code === "string" ? code.trim().toUpperCase() : "";
@@ -220,6 +244,89 @@ function getClipboardModule() {
     clipboardModuleCache = null;
   }
   return clipboardModuleCache;
+}
+
+function getMediaLibraryModule() {
+  if (mediaLibraryModuleCache !== undefined) {
+    return mediaLibraryModuleCache;
+  }
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mediaLibraryModule = require("expo-media-library");
+    mediaLibraryModuleCache = mediaLibraryModule as MediaLibraryModule;
+  } catch {
+    mediaLibraryModuleCache = null;
+  }
+  return mediaLibraryModuleCache;
+}
+
+function getFileSystemModule() {
+  if (fileSystemModuleCache !== undefined) {
+    return fileSystemModuleCache;
+  }
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fileSystemModule = require("expo-file-system/legacy");
+    fileSystemModuleCache = fileSystemModule as FileSystemModule;
+  } catch {
+    fileSystemModuleCache = null;
+  }
+  return fileSystemModuleCache;
+}
+
+function getImageFileExtension(uri: string) {
+  const cleanUri = uri.split(/[?#]/)[0] ?? "";
+  const match = cleanUri.match(/\.([a-z0-9]+)$/i);
+  const extension = match?.[1]?.toLowerCase();
+  if (
+    extension &&
+    ["jpg", "jpeg", "png", "webp", "heic", "heif", "gif"].includes(extension)
+  ) {
+    return extension;
+  }
+  return "jpg";
+}
+
+async function materializeImageForMediaLibrary(uri: string) {
+  const cleanUri = uri.split(/[?#]/)[0] ?? "";
+  const hasImageExtension = /\.(jpe?g|png|webp|heic|heif|gif)$/i.test(cleanUri);
+  const needsTemporaryFile =
+    isRemoteImageUri(uri) ||
+    (Platform.OS === "android" && !uri.startsWith("file://")) ||
+    !hasImageExtension;
+
+  if (!needsTemporaryFile) {
+    return { uri, cleanupUri: "" };
+  }
+
+  const fileSystem = getFileSystemModule();
+  if (!fileSystem?.cacheDirectory) {
+    throw new Error("当前构建无法访问缓存目录，暂时不能保存图片。");
+  }
+
+  const cacheBase = fileSystem.cacheDirectory.endsWith("/")
+    ? fileSystem.cacheDirectory
+    : `${fileSystem.cacheDirectory}/`;
+  const tempUri = `${cacheBase}space-post-${Date.now()}-${Math.random()
+    .toString(16)
+    .slice(2)}.${getImageFileExtension(uri)}`;
+
+  if (isRemoteImageUri(uri)) {
+    if (!fileSystem.downloadAsync) {
+      throw new Error("当前构建缺少图片下载能力，暂时不能保存网络图片。");
+    }
+    const downloaded = await fileSystem.downloadAsync(uri, tempUri);
+    return {
+      uri: downloaded.uri || tempUri,
+      cleanupUri: downloaded.uri || tempUri,
+    };
+  }
+
+  if (!fileSystem.copyAsync) {
+    throw new Error("当前构建缺少图片复制能力，暂时不能保存这张图片。");
+  }
+  await fileSystem.copyAsync({ from: uri, to: tempUri });
+  return { uri: tempUri, cleanupUri: tempUri };
 }
 
 // UserAvatar 统一处理大厅里的头像渲染和兜底首字显示。
@@ -338,6 +445,9 @@ export function SpaceWorkspaceScreen({
   const [syncingSpace, setSyncingSpace] = useState(false);
   const [updatingPostId, setUpdatingPostId] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<FeedPostImage | null>(null);
+  const [savingPreviewImageId, setSavingPreviewImageId] = useState<
+    string | null
+  >(null);
   const [deletingImageId, setDeletingImageId] = useState<string | null>(null);
   const [postText, setPostText] = useState("");
   const [selectedImageUris, setSelectedImageUris] = useState<string[]>([]);
@@ -960,6 +1070,60 @@ export function SpaceWorkspaceScreen({
         },
       },
     ]);
+  };
+
+  const savePreviewImageToAlbum = async () => {
+    const image = previewImage;
+    if (!image || savingPreviewImageId) {
+      return;
+    }
+
+    const mediaLibrary = getMediaLibraryModule();
+    if (!mediaLibrary?.saveToLibraryAsync) {
+      Alert.alert(
+        "保存不可用",
+        "当前构建未包含保存到相册模块，请重新构建开发客户端。",
+      );
+      return;
+    }
+
+    setSavingPreviewImageId(image.id);
+    let cleanupUri = "";
+    try {
+      if (mediaLibrary.requestPermissionsAsync) {
+        const permission = await mediaLibrary.requestPermissionsAsync(
+          true,
+          Platform.OS === "android" ? ["photo"] : undefined,
+        );
+        if (!permission.granted) {
+          Alert.alert(
+            "未获得相册权限",
+            permission.canAskAgain === false
+              ? "请在系统设置中允许应用保存照片后再试。"
+              : "需要允许保存照片，才能把动态图片写入系统相册。",
+          );
+          return;
+        }
+      }
+
+      const materializedImage = await materializeImageForMediaLibrary(
+        image.uri,
+      );
+      cleanupUri = materializedImage.cleanupUri;
+      await mediaLibrary.saveToLibraryAsync(materializedImage.uri);
+      Alert.alert("已保存", "图片已保存到系统相册。");
+    } catch (error) {
+      Alert.alert("保存失败", String(error));
+    } finally {
+      if (cleanupUri) {
+        await getFileSystemModule()
+          ?.deleteAsync?.(cleanupUri, { idempotent: true })
+          .catch(() => undefined);
+      }
+      setSavingPreviewImageId((current) =>
+        current === image.id ? null : current,
+      );
+    }
   };
 
   const onComment = async (postId: string) => {
@@ -2298,11 +2462,30 @@ export function SpaceWorkspaceScreen({
             <Text style={styles.previewCloseText}>关闭</Text>
           </Pressable>
           {previewImage ? (
-            <Image
-              source={{ uri: previewImage.uri }}
-              style={styles.previewImage}
-              resizeMode="contain"
-            />
+            <>
+              <Image
+                source={{ uri: previewImage.uri }}
+                style={styles.previewImage}
+                resizeMode="contain"
+              />
+              <View style={styles.previewActionRow}>
+                <Pressable
+                  style={[
+                    styles.previewSaveButton,
+                    savingPreviewImageId === previewImage.id &&
+                      styles.disabledButton,
+                  ]}
+                  disabled={savingPreviewImageId === previewImage.id}
+                  onPress={() => void savePreviewImageToAlbum()}
+                >
+                  <Text style={styles.previewSaveButtonText}>
+                    {savingPreviewImageId === previewImage.id
+                      ? "保存中..."
+                      : "保存到相册"}
+                  </Text>
+                </Pressable>
+              </View>
+            </>
           ) : null}
         </View>
       </Modal>

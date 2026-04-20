@@ -301,7 +301,7 @@ export async function leaveSpaceLocally(spaceId: string, userId: string) {
 
   await database.write(async () => {
     for (const record of records) {
-      await record.markAsDeleted();
+      await record.destroyPermanently();
     }
   });
 

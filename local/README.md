@@ -2,11 +2,9 @@
 
 This is an [Expo](https://expo.dev) project started with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
 
-## Code reading guide
+## configuration
 
-如果你想系统读懂 `local/` 里的页面、数据层和数据库实现，建议先看：
-
-- [`../docs/local-code-guide.md`](../docs/local-code-guide.md)
+// TODO：添加对配置文件的说明
 
 ## fmt&lint standard
 

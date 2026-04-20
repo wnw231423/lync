@@ -13,6 +13,13 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import WebView, { type WebViewMessageEvent } from "react-native-webview";
 import {
+  configureBaiduNativeLocation,
+  getBaiduNativeCurrentPosition,
+  isBaiduNativeLocationSupported,
+  startBaiduNativeLocationUpdates,
+  type BaiduNativeLocationResult,
+} from "@/features/travel/baiduLocation";
+import {
   getSpaceSnapshotFromDb,
   type SpaceData,
 } from "@/features/travel/spaceDb";
@@ -123,7 +130,12 @@ type WsEnvelope = {
 type ResolvedLocation = {
   coords: Location.LocationObjectCoords;
   usedLastKnown: boolean;
-  source: "native" | "last_known" | "webview_browser" | "webview_baidu";
+  source:
+    | "native"
+    | "last_known"
+    | "webview_browser"
+    | "webview_baidu"
+    | "baidu_native";
   coordinateSystem: CoordinateSystem;
 };
 
@@ -178,6 +190,10 @@ function buildMapHtml(baiduMapAk: string) {
       let markerOverlays = [];
       const convertedMarkerCache = new Map();
       let latestWebLocation = null;
+      let browserWatchStarted = false;
+      const browserLocationReuseMs = 120000;
+      const baiduLocationReuseMs = 60000;
+      const baiduLocationMaxAccuracyMeters = 1000;
 
       function postToApp(payload) {
         if (
@@ -345,8 +361,30 @@ function buildMapHtml(baiduMapAk: string) {
         postToApp(payload);
       }
 
+      function isFreshLocation(payload, maxAgeMs) {
+        return (
+          payload &&
+          typeof payload.sent_at === "number" &&
+          Date.now() - payload.sent_at < maxAgeMs
+        );
+      }
+
+      function isReliableBaiduWebLocation(payload) {
+        return (
+          payload &&
+          payload.coordinate_system === "bd09" &&
+          typeof payload.accuracy === "number" &&
+          isFinite(payload.accuracy) &&
+          payload.accuracy > 0 &&
+          payload.accuracy <= baiduLocationMaxAccuracyMeters
+        );
+      }
+
       function requestBaiduWebLocation(previousMessage) {
-        if (latestWebLocation && latestWebLocation.coordinate_system === "bd09") {
+        if (
+          isReliableBaiduWebLocation(latestWebLocation) &&
+          isFreshLocation(latestWebLocation, baiduLocationReuseMs)
+        ) {
           postToApp(latestWebLocation);
           return;
         }
@@ -362,22 +400,49 @@ function buildMapHtml(baiduMapAk: string) {
         }
 
         const geolocation = new BMap.Geolocation();
+        if (typeof geolocation.enableSDKLocation === "function") {
+          try {
+            geolocation.enableSDKLocation();
+          } catch (error) {
+            // WebView 没有启用 SDK 辅助定位时会静默退回网页定位。
+          }
+        }
+
         geolocation.getCurrentPosition(
           function (result) {
             const status = typeof this.getStatus === "function" ? this.getStatus() : -1;
+            const accuracy =
+              result && typeof result.accuracy === "number" && isFinite(result.accuracy)
+                ? result.accuracy
+                : null;
             if (
               (status === 0 || status === window.BMAP_STATUS_SUCCESS) &&
               result &&
-              result.point
+              result.point &&
+              accuracy !== null &&
+              accuracy > 0 &&
+              accuracy <= baiduLocationMaxAccuracyMeters
             ) {
               postWebLocation({
                 type: "web_location",
                 latitude: result.point.lat,
                 longitude: result.point.lng,
-                accuracy:
-                  typeof result.accuracy === "number" ? result.accuracy : null,
+                accuracy,
                 coordinate_system: "bd09",
                 sent_at: Date.now(),
+              });
+              return;
+            }
+
+            if (
+              (status === 0 || status === window.BMAP_STATUS_SUCCESS) &&
+              result &&
+              result.point
+            ) {
+              postToApp({
+                type: "web_location_error",
+                message:
+                  "百度兼容定位当前只返回了城市级估算位置，精度不足，已放弃使用该结果。",
               });
               return;
             }
@@ -432,7 +497,7 @@ function buildMapHtml(baiduMapAk: string) {
         if (
           latestWebLocation &&
           latestWebLocation.coordinate_system === "gps" &&
-          Date.now() - (latestWebLocation.sent_at || 0) < 120000
+          isFreshLocation(latestWebLocation, browserLocationReuseMs)
         ) {
           postToApp(latestWebLocation);
           return;
@@ -656,6 +721,14 @@ function getFriendlyLocationErrorMessage(error: unknown) {
   }
 
   if (
+    lowerMessage.includes("城市级估算") ||
+    lowerMessage.includes("估算位置") ||
+    lowerMessage.includes("精度不足")
+  ) {
+    return "百度兼容定位当前只返回了城市级估算位置，系统已经放弃使用这个结果。请优先开启系统定位和 WebView 定位权限，尽量改用浏览器兼容或原生定位。";
+  }
+
+  if (
     lowerMessage.includes("location services") ||
     lowerMessage.includes("current location is unavailable") ||
     lowerMessage.includes("provider") ||
@@ -713,6 +786,17 @@ function chooseBetterLocation(
   return nativeLocation;
 }
 
+function createResolvedBaiduNativeLocation(
+  payload: BaiduNativeLocationResult,
+): ResolvedLocation {
+  return {
+    coords: buildCoords(payload.latitude, payload.longitude, payload.accuracy),
+    usedLastKnown: false,
+    source: "baidu_native",
+    coordinateSystem: payload.coordinateSystem === "bd09" ? "bd09" : "gps",
+  };
+}
+
 export default function LocationPage() {
   const { code } = useLocalSearchParams<{ code?: string }>();
   const spaceCode = typeof code === "string" ? code : "";
@@ -731,6 +815,8 @@ export default function LocationPage() {
   const [socketRetryTick, setSocketRetryTick] = useState(0);
 
   const baiduMapAk = process.env.EXPO_PUBLIC_BAIDU_MAP_AK?.trim() || "";
+  const baiduNativeAk =
+    process.env.EXPO_PUBLIC_BAIDU_LOCATION_ANDROID_AK?.trim() || "";
   const baiduMapOrigin =
     process.env.EXPO_PUBLIC_BAIDU_MAP_WEB_ORIGIN?.trim() ||
     "https://travel-map.local";
@@ -758,6 +844,8 @@ export default function LocationPage() {
   );
   const latestMarkersRef = useRef<MemberMarker[]>([]);
   const networkProviderSupportedRef = useRef(true);
+  const baiduNativeConfiguredRef = useRef(false);
+  const baiduNativeWatchStartedRef = useRef(false);
 
   useFocusEffect(
     useCallback(() => {
@@ -876,6 +964,43 @@ export default function LocationPage() {
 
     return cachedLocation.result;
   }, []);
+
+  const ensureBaiduNativeReady = useCallback(async () => {
+    if (Platform.OS !== "android" || !baiduNativeAk) {
+      return false;
+    }
+
+    const supported = await isBaiduNativeLocationSupported().catch(() => false);
+    if (!supported) {
+      return false;
+    }
+
+    if (baiduNativeConfiguredRef.current) {
+      return true;
+    }
+
+    await configureBaiduNativeLocation(baiduNativeAk);
+    baiduNativeConfiguredRef.current = true;
+    return true;
+  }, [baiduNativeAk]);
+
+  const requestBaiduNativeLocation = useCallback(
+    async (preferFresh: boolean): Promise<ResolvedLocation | null> => {
+      if (!(await ensureBaiduNativeReady())) {
+        return null;
+      }
+
+      const nativePayload = await getBaiduNativeCurrentPosition({
+        timeoutMs: preferFresh ? 15000 : 12000,
+      }).catch(() => null);
+      if (!nativePayload) {
+        return null;
+      }
+
+      return createResolvedBaiduNativeLocation(nativePayload);
+    },
+    [ensureBaiduNativeReady],
+  );
 
   const requestWebViewLocation = useCallback(
     async (preferFresh: boolean): Promise<ResolvedLocation> => {
@@ -998,6 +1123,10 @@ export default function LocationPage() {
           setLocationNotice(
             "当前设备正在使用百度兼容定位，定位精度会受到网络环境和地图服务影响。",
           );
+        } else if (result.source === "baidu_native") {
+          setLocationNotice(
+            "当前设备正在使用百度原生定位，位置共享会优先走原生链路，响应和稳定性会更好。",
+          );
         } else if (result.usedLastKnown) {
           setLocationNotice("当前使用的是最近一次可用定位，精度可能略低。");
         } else {
@@ -1064,6 +1193,18 @@ export default function LocationPage() {
 
   const resolveCurrentLocation = useCallback(
     async (preferFresh: boolean): Promise<ResolvedLocation> => {
+      const baiduNativeLocation =
+        Platform.OS === "android"
+          ? await requestBaiduNativeLocation(preferFresh).catch(() => null)
+          : null;
+
+      if (
+        baiduNativeLocation &&
+        getAccuracyValue(baiduNativeLocation.coords.accuracy) <= 120
+      ) {
+        return baiduNativeLocation;
+      }
+
       if (Platform.OS === "android" && networkProviderSupportedRef.current) {
         await Location.enableNetworkProviderAsync().catch(() => {
           networkProviderSupportedRef.current = false;
@@ -1092,6 +1233,10 @@ export default function LocationPage() {
           coordinateSystem: "gps",
         };
 
+        if (baiduNativeLocation) {
+          return chooseBetterLocation(baiduNativeLocation, resolvedNative);
+        }
+
         if (getAccuracyValue(nativeLocation.coords.accuracy) <= 120) {
           return resolvedNative;
         }
@@ -1101,6 +1246,10 @@ export default function LocationPage() {
         );
         return chooseBetterLocation(resolvedNative, webLocation);
       } catch (error) {
+        if (baiduNativeLocation) {
+          return baiduNativeLocation;
+        }
+
         const webLocation = await requestWebViewLocation(preferFresh).catch(
           () => null,
         );
@@ -1134,7 +1283,7 @@ export default function LocationPage() {
         throw error;
       }
     },
-    [requestWebViewLocation],
+    [requestBaiduNativeLocation, requestWebViewLocation],
   );
 
   const publishCurrentLocation = useCallback(
@@ -1244,6 +1393,69 @@ export default function LocationPage() {
       requestPermissionFlow();
     })();
   }, [currentProfile, requestPermissionFlow, space]);
+
+  useEffect(() => {
+    if (
+      permissionState !== "granted" ||
+      !space ||
+      !currentProfile ||
+      Platform.OS !== "android" ||
+      baiduNativeWatchStartedRef.current
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    let stopWatching: (() => void) | null = null;
+
+    void (async () => {
+      try {
+        if (!(await ensureBaiduNativeReady())) {
+          return;
+        }
+
+        baiduNativeWatchStartedRef.current = true;
+        stopWatching = await startBaiduNativeLocationUpdates(
+          {
+            intervalMs: 3000,
+          },
+          (payload) => {
+            if (cancelled) {
+              return;
+            }
+
+            const resolved = createResolvedBaiduNativeLocation(payload);
+            broadcastResolvedLocation(resolved);
+          },
+          (error) => {
+            if (!cancelled) {
+              console.log(error);
+            }
+          },
+        );
+        if (cancelled) {
+          stopWatching?.();
+          stopWatching = null;
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.log(error);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      baiduNativeWatchStartedRef.current = false;
+      stopWatching?.();
+    };
+  }, [
+    broadcastResolvedLocation,
+    currentProfile,
+    ensureBaiduNativeReady,
+    permissionState,
+    space,
+  ]);
 
   useEffect(() => {
     if (permissionState !== "granted" || !space || !currentProfile) {

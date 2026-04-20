@@ -32,20 +32,32 @@
 
 假设以空间为同步单位，用户点击"同步"后，同步过程如下：
 
-1. 客户端 `POST spaces`，参数userid和spaceid
+1. 客户端 `POST spaces`，header有userid，参数有spaceid:
+    - 服务器会确保user，space，user_space中有相关记录
+    - 后续客户端请求的header中都要有spaceid和userid，只有存在user-space绑定关系的请求才会被允许
+    - 该设计意在做一个临时的身份验证和安全保护。但实际安全性暂存争议，后续可考虑改进。
 2. 客户端 `GET sync`, 参数user_id, space_id, last_pulled_at.
 3. 服务器的处理方式如下：
     1. 对于user，space, space_members表：
         - 先根据space_id做筛选，选出space内的user，space，space_members
         - 直接把筛选出来的数据塞到changes的updated里.
+        - 这里全部塞到updated中的原因是，watermelonDB不允许重复创建，但是客户端可以通过`sendCreatedAsUpdated: true`选项，让watermelon对update做有则更新无则创建
     2. 对于其他数据表：
         - 先根据space_id做筛选，选出space内的数据
         - 根据last_pulled_at分别往changes里塞相应的created，updated，deleted
-    3. 返回此回复。注意服务器要把客户端没有的字段删去。
-4. 客户端接收到回复，watermelonDB处理此回复
-5. 客户端 `POST sync`，
-    - // TODO： 重写一下这段文档
-6. 客户端 检查photos（检查所有记录，不要按照space_id筛选，因为可能有其他空间本地照片post失败的情况）：
+    3. 返回此回复，包括timestamp和changes。注意服务器要把客户端没有的字段删去。
+4. 客户端接收到回复，watermelonDB处理此回复，将changes写回数据库，timestamp则用于更新last_pulled_at
+5. 客户端 `POST sync`，包括last_pulled_at和changes
+6. 服务器的处理方式如下：
+    - 处理changes中的数据：
+        - 元数据表：直接接受并更新服务器数据库
+        - 数据表：对于changed中的
+            - created：新建该记录，server_created_at设为last_pulled_at
+            - updated：更新该记录，last_modified设为last_pulled_at
+            - deleted: 软删除，deleted_at设为last_pulled_at
+        - 这里设为last_pulled_at而不是服务器此刻时间戳`nowmillis()`是因为：
+            - 设用户推送了一个created记录，last_pulled_at采用时间戳为t，如果你设置为t+delta。下次该客户端pull，依旧使用t，检测到t+delta>t，服务器会把该记录放到created中，导致客户端重复create报错
+7. 客户端 检查photos（检查所有记录，不要按照space_id筛选，因为可能有其他空间本地照片post失败的情况）：
     - `remote_url` 为空，且 `${App存储目录}/photos/${photo_id}.jpg` 存在：说明这是本地新建、尚未上传二进制的图片。前端需调用 `POST /api/v1/photos` 做上传补偿；服务端写入 `remote_url` 后，客户端下次 sync 会拉到它。
     - `remote_url` 非空，且 `${App存储目录}/photos/${photo_id}.jpg` 不存在：说明 photo 元数据已经同步到本地，但图片文件本身还没落到设备上。前端应在 sync 完成后把图片下载到这个固定路径，供后续显示与离线访问。
     - `remote_url` 非空，且 `${App存储目录}/photos/${photo_id}.jpg` 已存在：说明这条 photo 已经是完整状态，不需要额外处理。
